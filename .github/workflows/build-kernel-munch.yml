@@ -44,7 +44,7 @@ jobs:
           echo "kernel_source already prepared"
         else
           rm -rf kernel_source
-          git clone --depth=1 https://github.com/NKR00711/android_kernel_xiaomi_sm8250 -b T kernel_source
+          git clone --depth=1 https://github.com/NKR00711/android_kernel_xiaomi_sm8250 -b android16-aptusitu kernel_source
         fi
 
     - name: Ensure Toolchain
