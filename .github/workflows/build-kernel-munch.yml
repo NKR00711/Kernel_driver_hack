@@ -84,6 +84,7 @@ jobs:
         ccache -M 5G
 
     - name: Prepare Kernel Source for Module Build
+      shell: bash
       working-directory: ./kernel_source
       run: |
         # Get defconfig name from input
@@ -102,10 +103,10 @@ jobs:
         fi
         
         # Handle custom vermagic
-        if [ -n "${{ inputs.vermagic_custom }}" ]; then
-          echo "=== Using custom vermagic: ${{ inputs.vermagic_custom }} ==="
+        VERMAGIC_CUSTOM="${{ inputs.vermagic_custom }}"
+        if [ -n "$VERMAGIC_CUSTOM" ]; then
+          echo "=== Using custom vermagic: $VERMAGIC_CUSTOM ==="
           
-          VERMAGIC_CUSTOM="${{ inputs.vermagic_custom }}"
           BASE_VERSION=$(echo "$VERMAGIC_CUSTOM" | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+')
           EXTRA_VERSION=$(echo "$VERMAGIC_CUSTOM" | sed "s/^$BASE_VERSION//")
           
@@ -118,6 +119,10 @@ jobs:
           fi
           
           EXTRA_VERSION=$(echo "$EXTRA_VERSION" | sed 's/-$//')
+          
+          echo "BASE_VERSION: $BASE_VERSION"
+          echo "EXTRA_VERSION: $EXTRA_VERSION"
+          echo "GIT_HASH: $GIT_HASH"
           
           sed -i 's/^VERSION =.*/VERSION = 4/' Makefile
           sed -i 's/^PATCHLEVEL =.*/PATCHLEVEL = 19/' Makefile
@@ -137,6 +142,11 @@ jobs:
           
           export KBUILD_BUILD_VERSION=""
           export KBUILD_BUILD_TIMESTAMP=""
+          
+          echo "=== Modified Makefile version ==="
+          grep -E "^(VERSION|PATCHLEVEL|SUBLEVEL|EXTRAVERSION) =" Makefile
+        else
+          echo "=== No custom vermagic provided, using kernel source default ==="
         fi
 
         # Reset module directory and sync latest code
@@ -166,7 +176,8 @@ jobs:
         scripts/config --file out/.config --set-str CONFIG_LOCALVERSION ""
         
         # Disable MODVERSIONS if requested
-        if [[ "${{ inputs.disable_modversions }}" == "true" ]]; then
+        DISABLE_MODVERSIONS="${{ inputs.disable_modversions }}"
+        if [ "$DISABLE_MODVERSIONS" = "true" ] || [ "$DISABLE_MODVERSIONS" = "True" ]; then
           echo "=== Disabling MODVERSIONS ==="
           scripts/config --file out/.config --disable CONFIG_MODVERSIONS
           scripts/config --file out/.config --disable CONFIG_ASM_MODVERSIONS
@@ -185,40 +196,27 @@ jobs:
         make O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- kernelrelease
 
     - name: Build Kernel Module
+      shell: bash
       working-directory: ./kernel_source
       run: |
         export KBUILD_BUILD_VERSION=""
         export KBUILD_BUILD_TIMESTAMP=""
         
-        # First, fix the source code to comment out unused variables
-        echo "=== Fixing source code warnings ==="
-        
-        # Fix memory.c - comment out unused variables
-        sed -i 's/^static struct kmem_cache \*my_vm_area_cachep.*/\/\/ static struct kmem_cache *my_vm_area_cachep = NULL;/' drivers/hack/memory.c || true
-        sed -i 's/^static int (\*insert_vm_struct_ptr).*/\/\/ static int (*insert_vm_struct_ptr)(struct mm_struct *mm, struct vm_area_struct *vma) = NULL;/' drivers/hack/memory.c || true
-        sed -i 's/^static bool ksyms_lookup_done.*/\/\/ static bool ksyms_lookup_done = false;/' drivers/hack/memory.c || true
-        
-        # Fix entry.c - comment out unused variables
-        sed -i 's/^    SPAWN_SUSPEND_CTL \*spawn_ctl.*/\/\/     SPAWN_SUSPEND_CTL *spawn_ctl = NULL;/' drivers/hack/entry.c || true
-        sed -i 's/^    RESUME_PROCESS_CTL \*resume_ctl.*/\/\/     RESUME_PROCESS_CTL *resume_ctl = NULL;/' drivers/hack/entry.c || true
-        sed -i 's/^    struct task_struct \*task.*/\/\/     struct task_struct *task = NULL;/' drivers/hack/entry.c || true
-        
-        # Build modules_prepare
+        echo "=== Building modules_prepare ==="
         make -j$(nproc --all) O=out ARCH=arm64 CC="ccache clang" CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- LD=ld.lld modules_prepare
         
-        # Build with -Wno-error and additional flags to suppress warnings
         echo "=== Building kernel module ==="
+        # Build with -Wno-error flags to suppress warnings
         make -j$(nproc --all) O=out ARCH=arm64 CC="ccache clang" CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- LD=ld.lld M=drivers/hack \
           EXTRA_CFLAGS="-Wno-error -Wno-unused-variable -Wno-unused-but-set-variable -Wno-missing-attributes -Wno-attributes -Wno-int-conversion -Wno-implicit-function-declaration -Wno-incompatible-pointer-types" || {
-            echo "Build failed with clang, trying with gcc..."
-            # Try with gcc as fallback
+            echo "Build with clang failed, trying with gcc..."
             make -j$(nproc --all) O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- M=drivers/hack \
               EXTRA_CFLAGS="-Wno-error -Wno-unused-variable -Wno-unused-but-set-variable" || exit 1
         }
         
         # Find and show the built modules
         echo "=== Built modules ==="
-        find out/drivers/hack -name "*.ko" -ls || echo "No modules found!"
+        find out/drivers/hack -name "*.ko" -ls 2>/dev/null || echo "No modules found!"
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
