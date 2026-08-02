@@ -1,20 +1,19 @@
-name: Munch Kernel Driver Builder
+name: A Munch Kernel Driver Builder
 
 permissions:
   contents: write
 
-on:
-  # Allow manual trigger
+on: 
   workflow_dispatch:
     inputs:
       kernel_url:
         description: "Kernel Source Git URL"
         required: true
-        default: "https://github.com/AstideLabs/android_kernel_xiaomi_sm8250"
+        default: "https://github.com/NKR00711/kernel_xiaomi_sm8250_mod"
       kernel_ref:
         description: "Branch / tag / commit (optional)"
         required: false
-        default: "v20260417-c0fd5eb8"
+        default: ""
       defconfig:
         description: "Defconfig name (e.g. munch_defconfig)"
         required: true
@@ -25,7 +24,7 @@ on:
         default: true
         type: boolean
       vermagic_custom:
-        description: "Custom vermagic string (e.g., 4.19.325-cip130-st14-aptusitu-perf-gc0fd5eb8c999). Leave empty to auto-detect from kernel source"
+        description: "Custom vermagic string (e.g., 4.19.325-cip130-st14-aptusitu-perf-gc0fd5eb8c999). Leave empty to auto-detect from kernelsrc source"
         required: false
         default: ""
         type: string
@@ -37,118 +36,75 @@ on:
         options:
           - "false"
           - "true"
-  
-  # Allow trigger on push to specific branches (optional)
-  push:
-    branches:
-      - main
-      - master
-      - develop
-  
-  # Allow trigger on pull request (optional)
-  pull_request:
-    branches:
-      - main
-      - master
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    container:
-      image: ubuntu:20.04
-
+    
     steps:
-    - name: Checkout Module Source
-      uses: actions/checkout@v4
-
-    - name: Install necessary packages
+    - uses: actions/checkout@v4
+    
+    - name: Install tools
       run: |
-        apt-get update
-        export DEBIAN_FRONTEND=noninteractive
-        ln -fs /usr/share/zoneinfo/America/New_York /etc/localtime
-        apt-get install -y tzdata lsb-release
-        dpkg-reconfigure --frontend noninteractive tzdata
-        apt-get install -y git ccache automake flex lzop bison gperf build-essential zip curl zlib1g-dev g++-multilib libxml2-utils bzip2 libbz2-dev libbz2-1.0 libghc-bzlib-dev squashfs-tools pngcrush schedtool dpkg-dev liblz4-tool make optipng maven libssl-dev pwgen libswitch-perl policycoreutils minicom libxml-sax-base-perl libxml-simple-perl bc libc6-dev-i386 lib32ncurses5-dev libx11-dev lib32z-dev libgl1-mesa-dev xsltproc unzip device-tree-compiler python3 python2 kmod
-
-    - name: Cache Dependencies
-      uses: actions/cache@v4
-      id: cache
-      with:
-        path: |
-          kernel_source
-          clang
-          ~/.ccache
-        key: ${{ runner.os }}-kernel-munch-${{ hashFiles('**/Makefile', 'kernel/**') }}
-        restore-keys: |
-          ${{ runner.os }}-kernel-munch-
-
-    - name: Ensure Kernel Source
+        sudo apt-get update
+        sudo apt-get install -y gcc-aarch64-linux-gnu libelf-dev bc bison flex libssl-dev zip kmod
+    
+    - name: Download kernelsrc
       run: |
-        if [ -d kernel_source/.git ]; then
-          echo "kernel_source already prepared"
+        set -euxo pipefail
+        rm -rf kernelsrc
+        if [ -z "${{ inputs.kernel_ref }}" ]; then
+          git clone --depth=1 --recurse-submodules --shallow-submodules "${{ inputs.kernel_url }}" kernelsrc
         else
-          rm -rf kernel_source
-          if [ -z "${{ inputs.kernel_ref }}" ]; then
-            git clone --depth=1 --recurse-submodules --shallow-submodules "${{ inputs.kernel_url }}" kernel_source
+          if git ls-remote --heads --tags "${{ inputs.kernel_url }}" "${{ inputs.kernel_ref }}" | grep -q .; then
+            git clone --depth=1 --branch "${{ inputs.kernel_ref }}" "${{ inputs.kernel_url }}" kernelsrc
           else
-            if git ls-remote --heads --tags "${{ inputs.kernel_url }}" "${{ inputs.kernel_ref }}" | grep -q .; then
-              git clone --depth=1 --branch "${{ inputs.kernel_ref }}" "${{ inputs.kernel_url }}" kernel_source
-            else
-              git clone "${{ inputs.kernel_url }}" kernel_source
-              cd kernel_source
-              git checkout "${{ inputs.kernel_ref }}"
-            fi
+            git clone "${{ inputs.kernel_url }}" kernelsrc
+            cd kernelsrc
+            git checkout "${{ inputs.kernel_ref }}"
           fi
         fi
-        echo "Kernel branch: $(git -C kernel_source branch --show-current 2>/dev/null || echo 'detached')"
-        echo "Kernel commit: $(git -C kernel_source rev-parse --short HEAD)"
-
-    - name: Ensure Toolchain
+        echo "Kernel branch: $(git branch --show-current)"
+        echo "Kernel commit: $(git rev-parse --short HEAD)"
+    
+    - name: Configure kernelsrc with custom vermagic
       run: |
-        if [ -d clang/.git ]; then
-          echo "clang already prepared"
-        else
-          rm -rf clang
-          git clone --depth=1 https://gitlab.com/LeCmnGend/proton-clang.git -b clang-13 clang
-        fi
+        set -euxo pipefail
+        cd kernelsrc
 
-    - name: Set up Environment
-      run: |
-        echo "$(pwd)/clang/bin" >> $GITHUB_PATH
-        echo "CCACHE_DIR=$(pwd)/.ccache" >> $GITHUB_ENV
-        echo "USE_CCACHE=1" >> $GITHUB_ENV
-        ccache -M 5G
-
-    - name: Prepare Kernel Source with Custom Vermagic
-      working-directory: ./kernel_source
-      run: |
-        # Remove ALL version-related files
+        DEFCONFIG_INPUT="${{ inputs.defconfig }}"
+        DEFCONFIG_NAME="$(basename "$DEFCONFIG_INPUT")"
+        test -f "arch/arm64/configs/$DEFCONFIG_NAME"
+        
+        # CRITICAL: Remove ALL files that influence version
         echo "=== Removing all version-related files ==="
         rm -f localversion* .scmversion .version
+        # Also remove any files in the root that might affect version
         find . -maxdepth 1 -name "localversion*" -delete 2>/dev/null || true
         
-        # Handle custom vermagic
+        # Handle vermagic configuration
         if [ -n "${{ inputs.vermagic_custom }}" ]; then
           echo "=== Using custom vermagic: ${{ inputs.vermagic_custom }} ==="
           
           VERMAGIC_CUSTOM="${{ inputs.vermagic_custom }}"
           
-          # Extract the base version
+          # Extract the base version (e.g., 4.19.325)
           BASE_VERSION=$(echo "$VERMAGIC_CUSTOM" | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+')
           
-          # Extract the EXTRAVERSION part
+          # Extract the EXTRAVERSION part (everything after the base version)
           EXTRA_VERSION=$(echo "$VERMAGIC_CUSTOM" | sed "s/^$BASE_VERSION//")
           
-          # Extract git hash if present
+          # Extract just the git hash part (the 'g' + 12 hex chars)
           if [[ "$VERMAGIC_CUSTOM" =~ (g[0-9a-f]{12}) ]]; then
             GIT_HASH="${BASH_REMATCH[1]}"
             echo "Detected git hash: $GIT_HASH"
+            # Remove the git hash from EXTRA_VERSION if present
             EXTRA_VERSION=$(echo "$EXTRA_VERSION" | sed "s/$GIT_HASH//")
           else
             GIT_HASH=""
           fi
           
-          # Clean up EXTRA_VERSION
+          # Clean up EXTRA_VERSION - remove any trailing dashes
           EXTRA_VERSION=$(echo "$EXTRA_VERSION" | sed 's/-$//')
           
           echo "=== Parsed components ==="
@@ -168,14 +124,17 @@ jobs:
             sed -i 's/^EXTRAVERSION =.*/EXTRAVERSION = /' Makefile
           fi
           
-          # Create .scmversion with git hash or empty
+          # CRITICAL: Disable git-based version detection
+          # Create a .scmversion file with exactly what we want (or empty)
           if [ -n "$GIT_HASH" ]; then
+            # If we have a custom git hash, use it
             echo "$GIT_HASH" > .scmversion
           else
+            # If no git hash, make it empty to prevent automatic git detection
             echo "" > .scmversion
           fi
           
-          # Export to prevent git detection
+          # CRITICAL: Also set KBUILD_BUILD_VERSION to prevent git detection
           export KBUILD_BUILD_VERSION=""
           export KBUILD_BUILD_TIMESTAMP=""
           
@@ -185,88 +144,74 @@ jobs:
           cat .scmversion || echo "No .scmversion file"
           
         else
-          echo "=== No custom vermagic provided, using kernel source default ==="
+          echo "=== No custom vermagic provided, using kernelsrc source default ==="
         fi
-
-        # Reset module directory and sync latest code
-        rm -rf drivers/hack
-        mkdir -p drivers/hack
-        cp -a ../kmemRW/. drivers/hack/
-
-        # Create Kconfig if it doesn't exist
-        if [ ! -f drivers/hack/Kconfig ]; then
-          cat > drivers/hack/Kconfig << 'EOF'
-        config KERNEL_HACK
-                tristate "Kernel Hack Module"
-                help
-                  This is a custom kernel module for memory operations.
-                  Say Y/M here to enable the kernel hack module.
-        EOF
-                fi
-
-        # Add module to Kconfig and Makefile (idempotent)
-        grep -q 'source "drivers/hack/Kconfig"' drivers/Kconfig || echo 'source "drivers/hack/Kconfig"' >> drivers/Kconfig
-        grep -q 'obj-$(CONFIG_KERNEL_HACK) += hack/' drivers/Makefile || echo 'obj-$(CONFIG_KERNEL_HACK) += hack/' >> drivers/Makefile
-
-        # Configure the kernel
-        make O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- ${{ inputs.defconfig }}
         
-        # Override CONFIG_LOCALVERSION
+        # Set config
+        make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- "$DEFCONFIG_NAME"
+        
+        # CRITICAL: Override CONFIG_LOCALVERSION in the config
         echo "=== Overriding CONFIG_LOCALVERSION ==="
-        scripts/config --file out/.config --set-str CONFIG_LOCALVERSION ""
+        ./scripts/config --set-str CONFIG_LOCALVERSION ""
         
         # Disable MODVERSIONS if requested
         if [[ "${{ inputs.disable_modversions }}" == "true" ]]; then
           echo "=== Disabling MODVERSIONS ==="
-          scripts/config --file out/.config --disable CONFIG_MODVERSIONS
-          scripts/config --file out/.config --disable CONFIG_ASM_MODVERSIONS
-          scripts/config --file out/.config --disable CONFIG_MODULE_SRCVERSION_ALL
-          scripts/config --file out/.config --disable CONFIG_MODULE_FORCE_LOAD
+          ./scripts/config --disable CONFIG_MODVERSIONS
+          ./scripts/config --disable CONFIG_ASM_MODVERSIONS
+          ./scripts/config --disable CONFIG_MODULE_SRCVERSION_ALL
+          ./scripts/config --disable CONFIG_MODULE_FORCE_LOAD
         fi
         
-        # Enable the module config
-        scripts/config --file out/.config --enable CONFIG_KERNEL_HACK
+        make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
         
-        # Regenerate config
-        make O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
+        # Show what CONFIG_LOCALVERSION is set to
+        echo "=== CONFIG_LOCALVERSION value ==="
+        grep "^CONFIG_LOCALVERSION=" .config || echo "CONFIG_LOCALVERSION not set"
         
-        # Show kernel version
+        # Show the version that will be built
         echo "=== Kernel version being built ==="
-        make O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- kernelrelease
-
-    - name: Build Kernel Module
-      working-directory: ./kernel_source
+        make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- kernelrelease
+        
+        # Prepare
+        make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules_prepare -j$(nproc)
+    
+    - name: Build module
       run: |
-        # Export variables to prevent git detection
+        KERNEL_DIR=$(pwd)/kernelsrc
+        MODULE_SRC=$(pwd)/kernel
+        
+        cd "$KERNEL_DIR"
+        # Export variables to prevent git detection during module build
         export KBUILD_BUILD_VERSION=""
         export KBUILD_BUILD_TIMESTAMP=""
+        make -C "$KERNEL_DIR" M="$MODULE_SRC" \
+          ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
+          KBUILD_BUILD_VERSION="" \
+          KBUILD_BUILD_TIMESTAMP="" \
+          modules -j$(nproc)
         
-        make -j$(nproc --all) O=out ARCH=arm64 CC="ccache clang" CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- LD=ld.lld modules_prepare
-        
-        make -j$(nproc --all) O=out ARCH=arm64 CC="ccache clang" CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- LD=ld.lld M=drivers/hack
-        
-        # Strip debug symbols
-        find out/drivers/hack -name "*.ko" -exec aarch64-linux-gnu-strip --strip-debug {} \;
-
+        aarch64-linux-gnu-strip --strip-debug "$MODULE_SRC"/*.ko
+    
     - name: Verify build and show vermagic
       run: |
         echo "=== Module info ==="
-        modinfo kernel_source/out/drivers/hack/*.ko || true
+        modinfo kernel/*.ko
         
         echo ""
         echo "=== Module vermagic ==="
-        modinfo -F vermagic kernel_source/out/drivers/hack/*.ko || echo "Could not read vermagic"
+        modinfo -F vermagic kernel/*.ko || echo "Could not read vermagic"
         
         echo ""
         echo "✅ SUCCESS: Module compiled!"
 
-    - name: Package kernel module (zip named from vermagic)
+    - name: Package kernelsrc module (zip named from vermagic)
       id: package
       shell: bash
       run: |
         set -euxo pipefail
         shopt -s nullglob
-        KOS=(kernel_source/out/drivers/hack/*.ko)
+        KOS=(kernel/*.ko)
         if [ ${#KOS[@]} -eq 0 ]; then
           echo "No .ko built, skipping packaging."
           echo "found=false" >> "$GITHUB_OUTPUT"
@@ -274,30 +219,30 @@ jobs:
         fi
 
         KO="${KOS[0]}"
-        VERMAGIC="$(modinfo -F vermagic "$KO" | tr -d '\n' | awk '{print $1}')"
+        VERMAGIC="$(modinfo -F vermagic "$KO" | tr -d '\n')"
         echo "vermagic: $VERMAGIC"
 
         # Clean the vermagic for use as filename
-        KREL="$(echo "$VERMAGIC" | sed 's/+/_/g' | sed 's/\//_/g')"
+        KREL="$(echo "$VERMAGIC" | awk '{print $1}' | sed 's/+/_/g' | sed 's/\//_/g')"
         
         MODNAME="nkrkdm"
-        ZIPNAME="${KREL}-${MODNAME}-kernel-driver.zip"
+        ZIPNAME="${KREL}-${MODNAME}-kernelsrc-driver.zip"
 
         mkdir -p dist
         rm -f "dist/$ZIPNAME"
-        (cd kernel_source/out/drivers/hack && zip -9 "../../../../dist/$ZIPNAME" ./*.ko)
+        (cd kernel && zip -9 "../dist/$ZIPNAME" ./*.ko)
 
         echo "found=true" >> "$GITHUB_OUTPUT"
         echo "tag_name=$KREL" >> "$GITHUB_OUTPUT"
         echo "zipname=$ZIPNAME" >> "$GITHUB_OUTPUT"
         echo "zippath=dist/$ZIPNAME" >> "$GITHUB_OUTPUT"
-
+    
     - name: Upload .ko as artifact
       if: steps.package.outputs.found == 'true'
       uses: actions/upload-artifact@v4
       with:
-        name: kernel-driver
-        path: kernel_source/out/drivers/hack/*.ko
+        name: kernelsrc-driver
+        path: kernel/*.ko
 
     - name: Generate release notes (modinfo)
       if: steps.package.outputs.found == 'true'
@@ -319,13 +264,13 @@ jobs:
           echo "### Module info"
           echo ""
           echo '```'
-          modinfo kernel_source/out/drivers/hack/*.ko
+          modinfo kernel/*.ko
           echo '```'
           echo ""
           echo "### Module vermagic"
           echo ""
           echo '```'
-          modinfo -F vermagic kernel_source/out/drivers/hack/*.ko
+          modinfo -F vermagic kernel/*.ko
           echo '```'
         } > dist/release_notes.md
 
