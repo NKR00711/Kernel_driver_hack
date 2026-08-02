@@ -3,7 +3,8 @@ name: Munch Kernel Driver Builder
 permissions:
   contents: write
 
-on: 
+on:
+  # Allow manual trigger
   workflow_dispatch:
     inputs:
       kernel_url:
@@ -36,6 +37,19 @@ on:
         options:
           - "false"
           - "true"
+  
+  # Allow trigger on push to specific branches (optional)
+  push:
+    branches:
+      - main
+      - master
+      - develop
+  
+  # Allow trigger on pull request (optional)
+  pull_request:
+    branches:
+      - main
+      - master
 
 jobs:
   build:
@@ -182,13 +196,13 @@ jobs:
         # Create Kconfig if it doesn't exist
         if [ ! -f drivers/hack/Kconfig ]; then
           cat > drivers/hack/Kconfig << 'EOF'
-config KERNEL_HACK
-        tristate "Kernel Hack Module"
-        help
-          This is a custom kernel module for memory operations.
-          Say Y/M here to enable the kernel hack module.
-EOF
-        fi
+        config KERNEL_HACK
+                tristate "Kernel Hack Module"
+                help
+                  This is a custom kernel module for memory operations.
+                  Say Y/M here to enable the kernel hack module.
+        EOF
+                fi
 
         # Add module to Kconfig and Makefile (idempotent)
         grep -q 'source "drivers/hack/Kconfig"' drivers/Kconfig || echo 'source "drivers/hack/Kconfig"' >> drivers/Kconfig
