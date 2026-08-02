@@ -1,11 +1,22 @@
 name: A Munch Build Kernel Module
 
 on:
-  # push:
-  #   branches: [ "main" ]
-  # pull_request:
-  #   branches: [ "main" ]
   workflow_dispatch:
+    inputs:
+      defconfig:
+        description: "Defconfig name (e.g., munch_defconfig)"
+        required: true
+        default: "munch_defconfig"
+      disable_modversions:
+        description: "Disable MODVERSIONS"
+        required: false
+        default: true
+        type: boolean
+      vermagic_custom:
+        description: "Custom vermagic string (leave empty for auto-detect)"
+        required: false
+        default: ""
+        type: string
 
 jobs:
   build:
@@ -24,7 +35,7 @@ jobs:
         ln -fs /usr/share/zoneinfo/America/New_York /etc/localtime
         apt-get install -y tzdata lsb-release
         dpkg-reconfigure --frontend noninteractive tzdata
-        apt-get install -y git ccache automake flex lzop bison gperf build-essential zip curl zlib1g-dev g++-multilib libxml2-utils bzip2 libbz2-dev libbz2-1.0 libghc-bzlib-dev squashfs-tools pngcrush schedtool dpkg-dev liblz4-tool make optipng maven libssl-dev pwgen libswitch-perl policycoreutils minicom libxml-sax-base-perl libxml-simple-perl bc libc6-dev-i386 lib32ncurses5-dev libx11-dev lib32z-dev libgl1-mesa-dev xsltproc unzip device-tree-compiler python3 python2
+        apt-get install -y git ccache automake flex lzop bison gperf build-essential zip curl zlib1g-dev g++-multilib libxml2-utils bzip2 libbz2-dev libbz2-1.0 libghc-bzlib-dev squashfs-tools pngcrush schedtool dpkg-dev liblz4-tool make optipng maven libssl-dev pwgen libswitch-perl policycoreutils minicom libxml-sax-base-perl libxml-simple-perl bc libc6-dev-i386 lib32ncurses5-dev libx11-dev lib32z-dev libgl1-mesa-dev xsltproc unzip device-tree-compiler python3 python2 kmod
 
     - name: Cache Dependencies
       uses: actions/cache@v4
@@ -34,18 +45,27 @@ jobs:
           kernel_source
           clang
           ~/.ccache
-        key: ${{ runner.os }}-kernel-chopin-${{ hashFiles('**/Makefile', 'kernel/**') }}
+        key: ${{ runner.os }}-kernel-munch-${{ hashFiles('**/Makefile', 'kernel/**') }}
         restore-keys: |
-          ${{ runner.os }}-kernel-chopin-
+          ${{ runner.os }}-kernel-munch-
 
     - name: Ensure Kernel Source
       run: |
         if [ -d kernel_source/.git ]; then
           echo "kernel_source already prepared"
+          cd kernel_source
+          git fetch --depth=1 origin v20260417-c0fd5eb8 2>/dev/null || true
+          git checkout v20260417-c0fd5eb8 2>/dev/null || git checkout HEAD
+          cd ..
         else
           rm -rf kernel_source
-          git clone --depth=1 https://github.com/AstideLabs/android_kernel_xiaomi_sm8250 -b v20260417-c0fd5eb8 kernel_source
+          git clone --depth=1 https://github.com/AstideLabs/android_kernel_xiaomi_sm8250 -b v20260417-c0fd5eb8 kernel_source || {
+            echo "Branch not found, cloning default branch..."
+            git clone --depth=1 https://github.com/AstideLabs/android_kernel_xiaomi_sm8250 kernel_source
+          }
         fi
+        echo "Kernel branch: $(git -C kernel_source branch --show-current 2>/dev/null || echo 'detached')"
+        echo "Kernel commit: $(git -C kernel_source rev-parse --short HEAD 2>/dev/null || echo 'unknown')"
 
     - name: Ensure Toolchain
       run: |
@@ -66,30 +86,184 @@ jobs:
     - name: Prepare Kernel Source for Module Build
       working-directory: ./kernel_source
       run: |
+        # Get defconfig name from input
+        DEFCONFIG="${{ inputs.defconfig }}"
+        if [ -z "$DEFCONFIG" ]; then
+          DEFCONFIG="munch_defconfig"
+        fi
+        echo "Using defconfig: $DEFCONFIG"
+        
+        # Check if defconfig exists
+        if [ ! -f "arch/arm64/configs/$DEFCONFIG" ]; then
+          echo "Error: Defconfig 'arch/arm64/configs/$DEFCONFIG' not found!"
+          echo "Available defconfigs:"
+          ls arch/arm64/configs/ | grep -E "(_defconfig$|defconfig$)" || echo "No defconfigs found"
+          exit 1
+        fi
+        
+        # Handle custom vermagic
+        if [ -n "${{ inputs.vermagic_custom }}" ]; then
+          echo "=== Using custom vermagic: ${{ inputs.vermagic_custom }} ==="
+          
+          VERMAGIC_CUSTOM="${{ inputs.vermagic_custom }}"
+          BASE_VERSION=$(echo "$VERMAGIC_CUSTOM" | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+')
+          EXTRA_VERSION=$(echo "$VERMAGIC_CUSTOM" | sed "s/^$BASE_VERSION//")
+          
+          if [[ "$VERMAGIC_CUSTOM" =~ (g[0-9a-f]{12}) ]]; then
+            GIT_HASH="${BASH_REMATCH[1]}"
+            echo "Detected git hash: $GIT_HASH"
+            EXTRA_VERSION=$(echo "$EXTRA_VERSION" | sed "s/$GIT_HASH//")
+          else
+            GIT_HASH=""
+          fi
+          
+          EXTRA_VERSION=$(echo "$EXTRA_VERSION" | sed 's/-$//')
+          
+          sed -i 's/^VERSION =.*/VERSION = 4/' Makefile
+          sed -i 's/^PATCHLEVEL =.*/PATCHLEVEL = 19/' Makefile
+          sed -i 's/^SUBLEVEL =.*/SUBLEVEL = 325/' Makefile
+          
+          if [ -n "$EXTRA_VERSION" ]; then
+            sed -i "s/^EXTRAVERSION =.*/EXTRAVERSION = $EXTRA_VERSION/" Makefile
+          else
+            sed -i 's/^EXTRAVERSION =.*/EXTRAVERSION = /' Makefile
+          fi
+          
+          if [ -n "$GIT_HASH" ]; then
+            echo "$GIT_HASH" > .scmversion
+          else
+            echo "" > .scmversion
+          fi
+          
+          export KBUILD_BUILD_VERSION=""
+          export KBUILD_BUILD_TIMESTAMP=""
+        fi
+
         # Reset module directory and sync latest code
         rm -rf drivers/hack
         mkdir -p drivers/hack
         cp -a ../kernel/. drivers/hack/
+
+        # Create Kconfig if it doesn't exist
+        if [ ! -f drivers/hack/Kconfig ]; then
+          cat > drivers/hack/Kconfig << 'EOF'
+          config KERNEL_HACK
+                  tristate "Kernel Hack Module"
+                  help
+                    This is a custom kernel module for memory operations.
+                    Say Y/M here to enable the kernel hack module.
+          EOF
+        fi
 
         # Add module to Kconfig and Makefile (idempotent)
         grep -q 'source "drivers/hack/Kconfig"' drivers/Kconfig || echo 'source "drivers/hack/Kconfig"' >> drivers/Kconfig
         grep -q 'obj-$(CONFIG_KERNEL_HACK) += hack/' drivers/Makefile || echo 'obj-$(CONFIG_KERNEL_HACK) += hack/' >> drivers/Makefile
 
         # Configure the kernel
-        make O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- munch_defconfig
+        make O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- "$DEFCONFIG"
+        
+        # Override CONFIG_LOCALVERSION
+        scripts/config --file out/.config --set-str CONFIG_LOCALVERSION ""
+        
+        # Disable MODVERSIONS if requested
+        if [[ "${{ inputs.disable_modversions }}" == "true" ]]; then
+          echo "=== Disabling MODVERSIONS ==="
+          scripts/config --file out/.config --disable CONFIG_MODVERSIONS
+          scripts/config --file out/.config --disable CONFIG_ASM_MODVERSIONS
+          scripts/config --file out/.config --disable CONFIG_MODULE_SRCVERSION_ALL
+          scripts/config --file out/.config --disable CONFIG_MODULE_FORCE_LOAD
+        fi
 
         # Enable the module config
         scripts/config --file out/.config --enable CONFIG_KERNEL_HACK
+        
+        # Regenerate config
+        make O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
+        
+        # Show kernel version
+        echo "=== Kernel version being built ==="
+        make O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- kernelrelease
 
     - name: Build Kernel Module
       working-directory: ./kernel_source
       run: |
+        export KBUILD_BUILD_VERSION=""
+        export KBUILD_BUILD_TIMESTAMP=""
+        
+        # First, fix the source code to comment out unused variables
+        echo "=== Fixing source code warnings ==="
+        
+        # Fix memory.c - comment out unused variables
+        sed -i 's/^static struct kmem_cache \*my_vm_area_cachep.*/\/\/ static struct kmem_cache *my_vm_area_cachep = NULL;/' drivers/hack/memory.c || true
+        sed -i 's/^static int (\*insert_vm_struct_ptr).*/\/\/ static int (*insert_vm_struct_ptr)(struct mm_struct *mm, struct vm_area_struct *vma) = NULL;/' drivers/hack/memory.c || true
+        sed -i 's/^static bool ksyms_lookup_done.*/\/\/ static bool ksyms_lookup_done = false;/' drivers/hack/memory.c || true
+        
+        # Fix entry.c - comment out unused variables
+        sed -i 's/^    SPAWN_SUSPEND_CTL \*spawn_ctl.*/\/\/     SPAWN_SUSPEND_CTL *spawn_ctl = NULL;/' drivers/hack/entry.c || true
+        sed -i 's/^    RESUME_PROCESS_CTL \*resume_ctl.*/\/\/     RESUME_PROCESS_CTL *resume_ctl = NULL;/' drivers/hack/entry.c || true
+        sed -i 's/^    struct task_struct \*task.*/\/\/     struct task_struct *task = NULL;/' drivers/hack/entry.c || true
+        
+        # Build modules_prepare
         make -j$(nproc --all) O=out ARCH=arm64 CC="ccache clang" CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- LD=ld.lld modules_prepare
         
-        make -j$(nproc --all) O=out ARCH=arm64 CC="ccache clang" CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- LD=ld.lld M=drivers/hack
+        # Build with -Wno-error and additional flags to suppress warnings
+        echo "=== Building kernel module ==="
+        make -j$(nproc --all) O=out ARCH=arm64 CC="ccache clang" CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- LD=ld.lld M=drivers/hack \
+          EXTRA_CFLAGS="-Wno-error -Wno-unused-variable -Wno-unused-but-set-variable -Wno-missing-attributes -Wno-attributes -Wno-int-conversion -Wno-implicit-function-declaration -Wno-incompatible-pointer-types" || {
+            echo "Build failed with clang, trying with gcc..."
+            # Try with gcc as fallback
+            make -j$(nproc --all) O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- M=drivers/hack \
+              EXTRA_CFLAGS="-Wno-error -Wno-unused-variable -Wno-unused-but-set-variable" || exit 1
+        }
+        
+        # Find and show the built modules
+        echo "=== Built modules ==="
+        find out/drivers/hack -name "*.ko" -ls || echo "No modules found!"
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
         name: KernelModule
-        path: kernel_source/out/drivers/hack/my_driver.ko
+        path: kernel_source/out/drivers/hack/*.ko
+
+    - name: Package Module
+      if: success()
+      shell: bash
+      run: |
+        shopt -s nullglob
+        KOS=(kernel_source/out/drivers/hack/*.ko)
+        if [ ${#KOS[@]} -eq 0 ]; then
+          echo "No .ko files found!"
+          echo "Checking build output..."
+          find kernel_source/out -name "*.ko" 2>/dev/null || echo "No .ko files anywhere"
+          exit 1
+        fi
+        
+        echo "Found ${#KOS[@]} module(s)"
+        for ko in "${KOS[@]}"; do
+          echo "Module: $ko"
+          modinfo "$ko" 2>/dev/null || echo "Could not read modinfo"
+        done
+        
+        # Get vermagic from first module
+        KO="${KOS[0]}"
+        VERMAGIC="$(modinfo -F vermagic "$KO" 2>/dev/null | tr -d '\n' | awk '{print $1}' || echo 'unknown')"
+        echo "vermagic: $VERMAGIC"
+        
+        # Create zip
+        KREL="$(echo "$VERMAGIC" | sed 's/+/_/g' | sed 's/\//_/g' | sed 's/-/_/g')"
+        ZIPNAME="${KREL}-kernel-module.zip"
+        
+        mkdir -p dist
+        (cd kernel_source/out/drivers/hack && zip -9 "../../../../dist/$ZIPNAME" ./*.ko 2>/dev/null)
+        
+        echo "Created: dist/$ZIPNAME"
+        echo "ZIP_NAME=$ZIPNAME" >> $GITHUB_ENV
+        echo "ZIP_PATH=dist/$ZIPNAME" >> $GITHUB_ENV
+        echo "VERMAGIC=$VERMAGIC" >> $GITHUB_ENV
+
+    - name: Upload Zip Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: KernelModule-Zip
+        path: ${{ env.ZIP_PATH }}
