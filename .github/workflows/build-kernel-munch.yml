@@ -1,4 +1,4 @@
-name: Build Munch Kernel Module (Using Local Module Source)
+name: Build Munch Kernel Module
 
 on:
   workflow_dispatch:
@@ -22,87 +22,53 @@ on:
 jobs:
   build-module:
     runs-on: ubuntu-latest
-    container:
-      image: ubuntu:20.04
+    # NO container - use the host Ubuntu directly like your kernel build
 
     steps:
-    - name: Checkout Repository (includes module source)
+    - name: Checkout Repository
       uses: actions/checkout@v4
       with:
         fetch-depth: 1
 
     - name: Install Build Dependencies
       run: |
-        apt-get update
-        export DEBIAN_FRONTEND=noninteractive
-        ln -fs /usr/share/zoneinfo/America/New_York /etc/localtime
-        apt-get install -y tzdata lsb-release
-        dpkg-reconfigure --frontend noninteractive tzdata
-        apt-get install -y \
-          git ccache automake flex lzop bison gperf \
-          build-essential zip curl wget zlib1g-dev \
-          g++-multilib libxml2-utils bzip2 libbz2-dev \
-          libbz2-1.0 libghc-bzlib-dev squashfs-tools \
-          pngcrush schedtool dpkg-dev liblz4-tool make \
-          optipng maven libssl-dev pwgen libswitch-perl \
-          policycoreutils minicom libxml-sax-base-perl \
-          libxml-simple-perl bc libc6-dev-i386 \
-          lib32ncurses5-dev libx11-dev lib32z-dev \
-          libgl1-mesa-dev xsltproc unzip device-tree-compiler \
-          python3 python2 kmod cpio
+        sudo apt-get update
+        sudo apt-get install -y \
+          bc bison build-essential ccache curl flex gawk \
+          git gnupg gperf imagemagick libncurses-dev \
+          lib32readline-dev lib32z1-dev liblz4-tool \
+          libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop \
+          pngcrush rsync schedtool squashfs-tools xsltproc \
+          zip zlib1g-dev python3 wget unzip
 
-    - name: Cache Toolchain
-      uses: actions/cache@v4
-      id: toolchain-cache
-      with:
-        path: /toolchain
-        key: ${{ runner.os }}-clang-16-munch
-        restore-keys: |
-          ${{ runner.os }}-clang-16-
-
-    - name: Setup Toolchain (ZyCromerZ Clang 16 - Same as Kernel Build)
+    - name: Setup zyc-clang 16 Toolchain
       run: |
-        mkdir -p /toolchain
-        cd /toolchain
-        
-        if [ ! -d "bin" ] || [ ! -f "bin/clang" ]; then
-          echo "Downloading ZyCromerZ Clang 16..."
+        mkdir -p $HOME/zyc-clang
+        cd $HOME/zyc-clang
+        if [ ! -d "Clang-16.0.6-20260510-release" ]; then
           wget -q https://github.com/ZyCromerZ/Clang/releases/download/16.0.6-20260510-release/Clang-16.0.6-20260510.tar.gz
-          
-          echo "Extracting Clang..."
-          tar -zxf Clang-16.0.6-20260510.tar.gz
-          
-          echo "Cleaning up..."
+          tar -zxvf Clang-16.0.6-20260510.tar.gz
           rm Clang-16.0.6-20260510.tar.gz
-          
-          echo "Toolchain contents:"
-          ls -la
-        else
-          echo "Toolchain already exists, using cached version"
         fi
-        
-        # Add to PATH
-        echo "/toolchain/bin" >> $GITHUB_PATH
-        
-        # Verify clang is working
-        echo "Verifying clang installation..."
-        /toolchain/bin/clang --version || {
-          echo "ERROR: clang not found in /toolchain/bin"
-          echo "Contents of /toolchain:"
-          ls -la /toolchain/
-          exit 1
-        }
+        echo "$HOME/zyc-clang/Clang-16.0.6-20260510-release/bin" >> $GITHUB_PATH
+
+    - name: Cache ccache
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/ccache_mikernel
+        key: ${{ runner.os }}-module-ccache-${{ github.run_id }}
+        restore-keys: |
+          ${{ runner.os }}-module-ccache-
 
     - name: Download Kernel Source
       run: |
-        # Clone the exact kernel source used for building
         git clone --depth=1 https://github.com/AstideLabs/android_kernel_xiaomi_sm8250 -b v20260417-c0fd5eb8 kernel_source || {
           echo "Branch not found, cloning default..."
           git clone --depth=1 https://github.com/AstideLabs/android_kernel_xiaomi_sm8250 kernel_source
         }
         echo "Kernel commit: $(git -C kernel_source rev-parse --short HEAD)"
 
-    - name: Download and Extract Kernel Build Artifacts
+    - name: Download Kernel Build Artifacts
       run: |
         mkdir -p kernel_artifacts
         
@@ -110,7 +76,7 @@ jobs:
           echo "Downloading kernel ZIP from URL..."
           wget -O kernel_artifacts/kernel.zip "${{ inputs.kernel_zip_url }}"
         else
-          echo "ERROR: Please provide the kernel ZIP URL from your kernel build"
+          echo "ERROR: Please provide the kernel ZIP URL"
           echo "Get it from: https://github.com/${{ github.repository }}/actions"
           exit 1
         fi
@@ -124,7 +90,10 @@ jobs:
       run: |
         cd kernel_source
         
-        # Create out directory structure
+        export ARCH=arm64
+        export PATH="$HOME/zyc-clang/Clang-16.0.6-20260510-release/bin:${PATH}"
+        
+        # Create out directory
         mkdir -p out
         
         # Copy kernel config and Module.symvers from artifacts
@@ -155,36 +124,25 @@ jobs:
       run: |
         cd kernel_source
         
-        # Check if module source exists in repo
         if [ ! -d "../${{ inputs.module_path }}" ]; then
           echo "❌ Module source not found at: ${{ inputs.module_path }}"
-          echo "Available directories in repo root:"
+          echo "Available directories:"
           ls -la ../
           exit 1
         fi
         
-        # Remove any existing hack directory
         rm -rf drivers/hack
-        
-        # Copy your module source from the repo to kernel tree
-        echo "📂 Copying module from: ../${{ inputs.module_path }}"
         cp -a ../${{ inputs.module_path }} drivers/hack
         
-        # Verify it was copied
         echo "✅ Module source copied to drivers/hack/"
-        echo "Files in module directory:"
         ls -la drivers/hack/
         
-        # Check for Makefile
         if [ ! -f "drivers/hack/Makefile" ]; then
-          echo "❌ Makefile not found in module source!"
-          echo "Please ensure your module has a Makefile"
+          echo "❌ Makefile not found!"
           exit 1
         fi
         
-        # Check for Kconfig
         if [ ! -f "drivers/hack/Kconfig" ]; then
-          echo "⚠️ Kconfig not found, creating one..."
           cat > drivers/hack/Kconfig << 'EOF'
           config KERNEL_HACK
                   tristate "Kernel Hack Module"
@@ -193,142 +151,103 @@ jobs:
           EOF
         fi
         
-        # Add module to kernel build system (idempotent)
         grep -q 'source "drivers/hack/Kconfig"' drivers/Kconfig || \
           echo 'source "drivers/hack/Kconfig"' >> drivers/Kconfig
         grep -q 'obj-$(CONFIG_KERNEL_HACK) += hack/' drivers/Makefile || \
           echo 'obj-$(CONFIG_KERNEL_HACK) += hack/' >> drivers/Makefile
         
-        # Enable the module in config
-        scripts/config --file out/.config --enable CONFIG_KERNEL_HACK
+        export ARCH=arm64
+        export PATH="$HOME/zyc-clang/Clang-16.0.6-20260510-release/bin:${PATH}"
         
-        # Regenerate config
+        scripts/config --file out/.config --enable CONFIG_KERNEL_HACK
         make O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- \
              CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
         
-        echo "✅ Module configured in kernel build system"
+        echo "✅ Module configured"
 
-    - name: Build Module Against Kernel Tree
+    - name: Build Module
       run: |
         cd kernel_source
         
         export ARCH=arm64
         export SUBARCH=arm64
-        export PATH="/toolchain/bin:${PATH}"
-        export CC=clang
+        export PATH="$HOME/zyc-clang/Clang-16.0.6-20260510-release/bin:${PATH}"
+        export CC="ccache clang"
         export CLANG_TRIPLE=aarch64-linux-gnu-
         export CROSS_COMPILE=aarch64-linux-gnu-
         export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
         
-        echo "=== Building Module Preparation ==="
-        # Prepare the module build environment
-        make -j$(nproc) O=out ARCH=arm64 CC="ccache clang" \
+        echo "=== Building modules_prepare ==="
+        make -j$(nproc) O=out ARCH=arm64 CC="$CC" \
              CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- \
              LD=ld.lld modules_prepare
         
-        echo "=== Building Your Module ==="
-        # Build the module using your Makefile
-        make -j$(nproc) O=out ARCH=arm64 CC="ccache clang" \
+        echo "=== Building module ==="
+        make -j$(nproc) O=out ARCH=arm64 CC="$CC" \
              CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- \
              LD=ld.lld M=drivers/hack
         
-        # Check if module was built
-        echo "=== Looking for built modules ==="
+        echo "=== Built modules ==="
         find out/drivers/hack -name "*.ko" -ls
-        
-        # Verify
-        if [ -z "$(find out/drivers/hack -name "*.ko")" ]; then
-          echo "❌ No .ko files found!"
-          echo "Build output:"
-          make M=drivers/hack 2>&1 | tail -50
-          exit 1
-        fi
-        
-        echo "✅ Module built successfully!"
 
-    - name: Verify Vermagic Match
+    - name: Verify Vermagic
       id: vermagic_check
       run: |
         cd kernel_source
         
-        # Get kernel vermagic
+        export ARCH=arm64
+        export PATH="$HOME/zyc-clang/Clang-16.0.6-20260510-release/bin:${PATH}"
+        
         KERNEL_VER=$(make O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- \
           CROSS_COMPILE=aarch64-linux-gnu- kernelrelease 2>/dev/null | tail -1)
         
         echo "📦 Kernel Vermagic: $KERNEL_VER"
         
-        # Get module vermagic
         MODULE_KO=$(find out/drivers/hack -name "*.ko" | head -1)
         if [ -f "$MODULE_KO" ]; then
           MODULE_VER=$(modinfo -F vermagic "$MODULE_KO" 2>/dev/null)
           echo "📦 Module Vermagic: $MODULE_VER"
           
           if [ "$KERNEL_VER" == "$MODULE_VER" ]; then
-            echo "✅ VERMAGIC MATCH! Module will load correctly."
+            echo "✅ VERMAGIC MATCH!"
             echo "vermagic_match=true" >> $GITHUB_OUTPUT
           else
             echo "❌ VERMAGIC MISMATCH!"
-            echo "Kernel:  $KERNEL_VER"
-            echo "Module:  $MODULE_VER"
             echo "vermagic_match=false" >> $GITHUB_OUTPUT
           fi
-        else
-          echo "❌ No module found!"
-          exit 1
         fi
 
     - name: Package Module
       run: |
         cd kernel_source/out/drivers/hack
         
-        # Find all modules
         KOS=(*.ko)
-        echo "Found ${#KOS[@]} module(s): ${KOS[@]}"
+        if [ ${#KOS[@]} -eq 0 ]; then
+          echo "❌ No modules found!"
+          exit 1
+        fi
         
-        # Get vermagic for filename
         VERMAGIC=$(modinfo -F vermagic "${KOS[0]}" 2>/dev/null | tr -d '\n' | sed 's/+/_/g' | sed 's/\//_/g' | sed 's/-/_/g')
         TIMESTAMP=$(date +'%Y%m%d_%H%M%S')
-        ZIP_NAME="munch_kernel_module_${VERMAGIC}_${TIMESTAMP}.zip"
+        ZIP_NAME="munch_module_${VERMAGIC}_${TIMESTAMP}.zip"
         
-        # Create package directory
         mkdir -p /module_package
-        
-        # Copy modules
         cp *.ko /module_package/
         
-        # Copy module source for reference
-        mkdir -p /module_package/source
-        cp -a ../../drivers/hack/Makefile /module_package/source/ 2>/dev/null || true
-        cp -a ../../drivers/hack/Kconfig /module_package/source/ 2>/dev/null || true
-        
-        # Create information file
         cat > /module_package/INFO.txt << EOF
         ==========================================
-        Kernel Module for Munch Device
+        Kernel Module for Munch
         ==========================================
+        Device: munch
+        Defconfig: ${{ inputs.defconfig }}
+        Vermagic: $VERMAGIC
+        Build Date: $(date -u)
+        Run ID: ${{ github.run_id }}
         
-        Build Information:
-        - Device: munch
-        - Defconfig: ${{ inputs.defconfig }}
-        - Kernel Vermagic: $VERMAGIC
-        - Build Date: $(date -u)
-        - GitHub Run: ${{ github.run_id }}
-        - Repository: ${{ github.repository }}
-        
-        Modules Included:
-        $(ls -la *.ko 2>/dev/null)
-        
-        Installation:
-        1. Copy module to device
-        2. insmod <module_name>.ko
-        
-        Verification:
-        modinfo <module_name>.ko
-        
+        Modules: $(ls *.ko)
         ==========================================
         EOF
         
-        # Create zip
         cd /module_package
         zip -r9 "../${ZIP_NAME}" ./*
         
@@ -342,34 +261,21 @@ jobs:
         path: ${{ env.ZIP_PATH }}
         compression-level: 0
 
-    - name: Upload Individual .ko Files
+    - name: Upload .ko Files
       uses: actions/upload-artifact@v4
       with:
         name: munch-module-ko-files
         path: kernel_source/out/drivers/hack/*.ko
         compression-level: 0
 
-    - name: Build Summary
+    - name: Summary
       if: always()
       run: |
-        echo "## 📊 Module Build Results" >> $GITHUB_STEP_SUMMARY
+        echo "## 📊 Build Results" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
         echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
         echo "| **Device** | munch |" >> $GITHUB_STEP_SUMMARY
-        echo "| **Defconfig** | ${{ inputs.defconfig }} |" >> $GITHUB_STEP_SUMMARY
-        echo "| **Module Path** | ${{ inputs.module_path }} |" >> $GITHUB_STEP_SUMMARY
-        echo "| **Kernel Vermagic** | ${{ env.KERNEL_VER }} |" >> $GITHUB_STEP_SUMMARY
-        echo "| **Vermagic Match** | ${{ steps.vermagic_check.outputs.vermagic_match }} |" >> $GITHUB_STEP_SUMMARY
-        echo "| **Module ZIP** | \`${{ env.ZIP_NAME }}\` |" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        
-        if [ "${{ steps.vermagic_check.outputs.vermagic_match }}" == "true" ]; then
-          echo "✅ **SUCCESS**: Module compiled with matching vermagic!" >> $GITHUB_STEP_SUMMARY
-        else
-          echo "⚠️ **WARNING**: Vermagic mismatch detected!" >> $GITHUB_STEP_SUMMARY
-          echo "The module may not load on your device." >> $GITHUB_STEP_SUMMARY
-        fi
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "### 📥 Download Artifacts" >> $GITHUB_STEP_SUMMARY
-        echo "The module packages are available in the artifacts section below." >> $GITHUB_STEP_SUMMARY
+        echo "| **Vermagic** | ${{ env.KERNEL_VER }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| **Match** | ${{ steps.vermagic_check.outputs.vermagic_match }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| **ZIP** | \`${{ env.ZIP_NAME }}\` |" >> $GITHUB_STEP_SUMMARY
