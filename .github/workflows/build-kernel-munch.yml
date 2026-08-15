@@ -67,11 +67,44 @@ jobs:
         if [ ! -d "zyc-clang" ]; then
           echo "Downloading ZyCromerZ Clang 16..."
           wget -q https://github.com/ZyCromerZ/Clang/releases/download/16.0.6-20260510-release/Clang-16.0.6-20260510.tar.gz
+          
+          echo "Extracting Clang..."
           tar -zxf Clang-16.0.6-20260510.tar.gz
+          
+          echo "Contents after extraction:"
+          ls -la
+          
+          # Find the extracted directory (it might have a different name)
+          EXTRACTED_DIR=$(find . -maxdepth 1 -type d -name "Clang-*" | head -1)
+          if [ -z "$EXTRACTED_DIR" ]; then
+            # Try to find any directory that might be the clang install
+            EXTRACTED_DIR=$(find . -maxdepth 1 -type d -name "*clang*" | head -1)
+          fi
+          
+          if [ -z "$EXTRACTED_DIR" ]; then
+            echo "ERROR: Could not find extracted clang directory!"
+            echo "Contents of /toolchain:"
+            ls -la
+            exit 1
+          fi
+          
+          echo "Found extracted directory: $EXTRACTED_DIR"
+          
+          # Rename to zyc-clang
+          mv "$EXTRACTED_DIR" zyc-clang
           rm Clang-16.0.6-20260510.tar.gz
-          mv Clang-16.0.6-20260510-release zyc-clang
         fi
+        
         echo "/toolchain/zyc-clang/bin" >> $GITHUB_PATH
+        
+        # Verify clang is working
+        echo "Verifying clang installation..."
+        clang --version || {
+          echo "ERROR: clang not found in /toolchain/zyc-clang/bin"
+          echo "Contents of /toolchain/zyc-clang:"
+          ls -la /toolchain/zyc-clang/
+          exit 1
+        }
 
     - name: Download Kernel Source
       run: |
