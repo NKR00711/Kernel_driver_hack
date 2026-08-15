@@ -64,45 +64,32 @@ jobs:
       run: |
         mkdir -p /toolchain
         cd /toolchain
-        if [ ! -d "zyc-clang" ]; then
+        
+        if [ ! -d "bin" ] || [ ! -f "bin/clang" ]; then
           echo "Downloading ZyCromerZ Clang 16..."
           wget -q https://github.com/ZyCromerZ/Clang/releases/download/16.0.6-20260510-release/Clang-16.0.6-20260510.tar.gz
           
           echo "Extracting Clang..."
           tar -zxf Clang-16.0.6-20260510.tar.gz
           
-          echo "Contents after extraction:"
-          ls -la
-          
-          # Find the extracted directory (it might have a different name)
-          EXTRACTED_DIR=$(find . -maxdepth 1 -type d -name "Clang-*" | head -1)
-          if [ -z "$EXTRACTED_DIR" ]; then
-            # Try to find any directory that might be the clang install
-            EXTRACTED_DIR=$(find . -maxdepth 1 -type d -name "*clang*" | head -1)
-          fi
-          
-          if [ -z "$EXTRACTED_DIR" ]; then
-            echo "ERROR: Could not find extracted clang directory!"
-            echo "Contents of /toolchain:"
-            ls -la
-            exit 1
-          fi
-          
-          echo "Found extracted directory: $EXTRACTED_DIR"
-          
-          # Rename to zyc-clang
-          mv "$EXTRACTED_DIR" zyc-clang
+          echo "Cleaning up..."
           rm Clang-16.0.6-20260510.tar.gz
+          
+          echo "Toolchain contents:"
+          ls -la
+        else
+          echo "Toolchain already exists, using cached version"
         fi
         
-        echo "/toolchain/zyc-clang/bin" >> $GITHUB_PATH
+        # Add to PATH
+        echo "/toolchain/bin" >> $GITHUB_PATH
         
         # Verify clang is working
         echo "Verifying clang installation..."
-        clang --version || {
-          echo "ERROR: clang not found in /toolchain/zyc-clang/bin"
-          echo "Contents of /toolchain/zyc-clang:"
-          ls -la /toolchain/zyc-clang/
+        /toolchain/bin/clang --version || {
+          echo "ERROR: clang not found in /toolchain/bin"
+          echo "Contents of /toolchain:"
+          ls -la /toolchain/
           exit 1
         }
 
@@ -227,7 +214,7 @@ jobs:
         
         export ARCH=arm64
         export SUBARCH=arm64
-        export PATH="/toolchain/zyc-clang/bin:${PATH}"
+        export PATH="/toolchain/bin:${PATH}"
         export CC=clang
         export CLANG_TRIPLE=aarch64-linux-gnu-
         export CROSS_COMPILE=aarch64-linux-gnu-
