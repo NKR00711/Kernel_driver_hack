@@ -148,29 +148,44 @@ jobs:
         # ==========================================
         echo "🔧 Patching touch_input.c for kernel compatibility..."
         if [ -f "drivers/hack/touch_input.c" ]; then
-          # Fix the append_event function - replace evt->time.tv_sec with evt->input_event_sec
           sed -i 's/evt->time\.tv_sec/evt->input_event_sec/g' drivers/hack/touch_input.c
           sed -i 's/evt->time\.tv_usec/evt->input_event_usec/g' drivers/hack/touch_input.c
           echo "✅ Applied input_event time field patch"
-          
-          # Also fix any unused variables in memory.c
-          if [ -f "drivers/hack/memory.c" ]; then
-            # Add __maybe_unused to suppress warnings
-            sed -i 's/static struct kmem_cache \*my_vm_area_cachep = NULL/static struct kmem_cache *my_vm_area_cachep __maybe_unused = NULL/g' drivers/hack/memory.c
-            sed -i 's/static int (\*insert_vm_struct_ptr)(struct mm_struct \*mm, struct vm_area_struct \*vma) = NULL/static int (*insert_vm_struct_ptr)(struct mm_struct *mm, struct vm_area_struct *vma) __maybe_unused = NULL/g' drivers/hack/memory.c
-            sed -i 's/static bool ksyms_lookup_done = false/static bool ksyms_lookup_done __maybe_unused = false/g' drivers/hack/memory.c
-            echo "✅ Applied memory.c unused variable fix"
+        fi
+        
+        # ==========================================
+        # 🛠️ AUTO-PATCH: Fix mmap_hijack.c missing headers
+        # ==========================================
+        echo "🔧 Patching mmap_hijack.c for missing vmalloc/vfree declarations..."
+        if [ -f "drivers/hack/mmap_hijack.c" ]; then
+          # Check if vmalloc.h is already included
+          if ! grep -q '#include <linux/vmalloc.h>' drivers/hack/mmap_hijack.c; then
+            # Add the include after the last existing include
+            sed -i '/#include <linux\/[a-z_]*\.h>/a #include <linux/vmalloc.h>' drivers/hack/mmap_hijack.c
+            echo "✅ Added #include <linux/vmalloc.h> to mmap_hijack.c"
+          else
+            echo "✅ mmap_hijack.c already includes vmalloc.h"
           fi
-          
-          # Fix entry.c unused variables
-          if [ -f "drivers/hack/entry.c" ]; then
-            sed -i 's/SPAWN_SUSPEND_CTL \*spawn_ctl = NULL/SPAWN_SUSPEND_CTL *spawn_ctl __maybe_unused = NULL/g' drivers/hack/entry.c
-            sed -i 's/RESUME_PROCESS_CTL \*resume_ctl = NULL/RESUME_PROCESS_CTL *resume_ctl __maybe_unused = NULL/g' drivers/hack/entry.c
-            sed -i 's/struct task_struct \*task = NULL/struct task_struct *task __maybe_unused = NULL/g' drivers/hack/entry.c
-            echo "✅ Applied entry.c unused variable fix"
-          fi
-        else
-          echo "⚠️ touch_input.c not found, skipping patches"
+        fi
+        
+        # ==========================================
+        # 🛠️ AUTO-PATCH: Fix unused variables in memory.c
+        # ==========================================
+        if [ -f "drivers/hack/memory.c" ]; then
+          sed -i 's/static struct kmem_cache \*my_vm_area_cachep = NULL/static struct kmem_cache *my_vm_area_cachep __maybe_unused = NULL/g' drivers/hack/memory.c
+          sed -i 's/static int (\*insert_vm_struct_ptr)(struct mm_struct \*mm, struct vm_area_struct \*vma) = NULL/static int (*insert_vm_struct_ptr)(struct mm_struct *mm, struct vm_area_struct *vma) __maybe_unused = NULL/g' drivers/hack/memory.c
+          sed -i 's/static bool ksyms_lookup_done = false/static bool ksyms_lookup_done __maybe_unused = false/g' drivers/hack/memory.c
+          echo "✅ Applied memory.c unused variable fix"
+        fi
+        
+        # ==========================================
+        # 🛠️ AUTO-PATCH: Fix entry.c unused variables
+        # ==========================================
+        if [ -f "drivers/hack/entry.c" ]; then
+          sed -i 's/SPAWN_SUSPEND_CTL \*spawn_ctl = NULL/SPAWN_SUSPEND_CTL *spawn_ctl __maybe_unused = NULL/g' drivers/hack/entry.c
+          sed -i 's/RESUME_PROCESS_CTL \*resume_ctl = NULL/RESUME_PROCESS_CTL *resume_ctl __maybe_unused = NULL/g' drivers/hack/entry.c
+          sed -i 's/struct task_struct \*task = NULL/struct task_struct *task __maybe_unused = NULL/g' drivers/hack/entry.c
+          echo "✅ Applied entry.c unused variable fix"
         fi
         
         # Check for Makefile
@@ -187,11 +202,11 @@ jobs:
         ccflags-y += -Wno-unused-function
         ccflags-y += -Wno-incompatible-pointer-types
         ccflags-y += -Wno-int-conversion
+        ccflags-y += -Wno-implicit-function-declaration
         EOF
         else
           # Remove any existing unsupported flags and add Clang-compatible ones
           echo "📝 Updating Makefile with Clang-compatible flags..."
-          # Remove lines with unsupported flags
           sed -i '/-Wno-unused-but-set-variable/d' drivers/hack/Makefile
           sed -i '/-Wno-missing-attributes/d' drivers/hack/Makefile
           
@@ -204,6 +219,7 @@ jobs:
             echo "ccflags-y += -Wno-unused-function" >> drivers/hack/Makefile
             echo "ccflags-y += -Wno-incompatible-pointer-types" >> drivers/hack/Makefile
             echo "ccflags-y += -Wno-int-conversion" >> drivers/hack/Makefile
+            echo "ccflags-y += -Wno-implicit-function-declaration" >> drivers/hack/Makefile
           fi
         fi
         
@@ -343,7 +359,6 @@ jobs:
         }
         
         echo "=== Building kernel module ==="
-        # Build without extra flags first (use the flags from Makefile)
         make -j$(nproc --all) O=out ARCH=arm64 CC="ccache clang" CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- LD=ld.lld M=drivers/hack || {
           echo "⚠️ Build failed, checking if any .ko files were created..."
           find out/drivers/hack -name "*.ko" -ls 2>/dev/null || echo "❌ No modules built"
