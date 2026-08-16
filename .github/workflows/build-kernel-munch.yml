@@ -143,6 +143,36 @@ jobs:
           exit 1
         fi
         
+        # ==========================================
+        # 🛠️ AUTO-PATCH: Fix input_event time field
+        # ==========================================
+        echo "🔧 Patching touch_input.c for kernel compatibility..."
+        if [ -f "drivers/hack/touch_input.c" ]; then
+          # Fix the append_event function - replace evt->time.tv_sec with evt->input_event_sec
+          sed -i 's/evt->time\.tv_sec/evt->input_event_sec/g' drivers/hack/touch_input.c
+          sed -i 's/evt->time\.tv_usec/evt->input_event_usec/g' drivers/hack/touch_input.c
+          echo "✅ Applied input_event time field patch"
+          
+          # Also fix any unused variables in memory.c
+          if [ -f "drivers/hack/memory.c" ]; then
+            # Add __maybe_unused to suppress warnings
+            sed -i 's/static struct kmem_cache \*my_vm_area_cachep = NULL/static struct kmem_cache *my_vm_area_cachep __maybe_unused = NULL/g' drivers/hack/memory.c
+            sed -i 's/static int (\*insert_vm_struct_ptr)(struct mm_struct \*mm, struct vm_area_struct \*vma) = NULL/static int (*insert_vm_struct_ptr)(struct mm_struct *mm, struct vm_area_struct *vma) __maybe_unused = NULL/g' drivers/hack/memory.c
+            sed -i 's/static bool ksyms_lookup_done = false/static bool ksyms_lookup_done __maybe_unused = false/g' drivers/hack/memory.c
+            echo "✅ Applied memory.c unused variable fix"
+          fi
+          
+          # Fix entry.c unused variables
+          if [ -f "drivers/hack/entry.c" ]; then
+            sed -i 's/SPAWN_SUSPEND_CTL \*spawn_ctl = NULL/SPAWN_SUSPEND_CTL *spawn_ctl __maybe_unused = NULL/g' drivers/hack/entry.c
+            sed -i 's/RESUME_PROCESS_CTL \*resume_ctl = NULL/RESUME_PROCESS_CTL *resume_ctl __maybe_unused = NULL/g' drivers/hack/entry.c
+            sed -i 's/struct task_struct \*task = NULL/struct task_struct *task __maybe_unused = NULL/g' drivers/hack/entry.c
+            echo "✅ Applied entry.c unused variable fix"
+          fi
+        else
+          echo "⚠️ touch_input.c not found, skipping patches"
+        fi
+        
         # Check for Makefile
         if [ ! -f "drivers/hack/Makefile" ]; then
           echo "❌ Makefile not found in module source!"
@@ -150,7 +180,21 @@ jobs:
           cat > drivers/hack/Makefile << 'EOF'
         obj-m += kernel_module.o
         kernel_module-objs := main.o
+        
+        # Suppress unused variable warnings
+        ccflags-y += -Wno-error
+        ccflags-y += -Wno-unused-variable
+        ccflags-y += -Wno-unused-but-set-variable
+        ccflags-y += -Wno-unused-function
         EOF
+        else
+          # Add compiler flags to existing Makefile
+          echo "" >> drivers/hack/Makefile
+          echo "# Suppress unused variable warnings" >> drivers/hack/Makefile
+          echo "ccflags-y += -Wno-error" >> drivers/hack/Makefile
+          echo "ccflags-y += -Wno-unused-variable" >> drivers/hack/Makefile
+          echo "ccflags-y += -Wno-unused-but-set-variable" >> drivers/hack/Makefile
+          echo "ccflags-y += -Wno-unused-function" >> drivers/hack/Makefile
         fi
         
         # Create Kconfig if it doesn't exist
@@ -282,14 +326,17 @@ jobs:
         export KBUILD_BUILD_TIMESTAMP=""
         
         echo "=== Building modules_prepare ==="
-        make -j$(nproc --all) O=out ARCH=arm64 CC="ccache clang" CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- LD=ld.lld modules_prepare
+        make -j$(nproc --all) O=out ARCH=arm64 CC="ccache clang" CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- LD=ld.lld modules_prepare || {
+          echo "⚠️ modules_prepare failed, trying with olddefconfig first..."
+          make O=out ARCH=arm64 CC="ccache clang" CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
+          make -j$(nproc --all) O=out ARCH=arm64 CC="ccache clang" CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- LD=ld.lld modules_prepare
+        }
         
         echo "=== Building kernel module ==="
-        # Use only supported warning flags for this clang version
-        make -j$(nproc --all) O=out ARCH=arm64 CC="ccache clang" CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- LD=ld.lld M=drivers/hack \
-          EXTRA_CFLAGS="-Wno-error -Wno-unused-variable -Wno-attributes -Wno-int-conversion -Wno-implicit-function-declaration -Wno-incompatible-pointer-types" || {
-            echo "⚠️ Build with clang had warnings, trying without extra flags..."
-            make -j$(nproc --all) O=out ARCH=arm64 CC="ccache clang" CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- LD=ld.lld M=drivers/hack || exit 1
+        make -j$(nproc --all) O=out ARCH=arm64 CC="ccache clang" CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- LD=ld.lld M=drivers/hack || {
+          echo "⚠️ Build failed, checking if any .ko files were created..."
+          find out/drivers/hack -name "*.ko" -ls 2>/dev/null || echo "❌ No modules built"
+          exit 1
         }
         
         # Find and show the built modules
