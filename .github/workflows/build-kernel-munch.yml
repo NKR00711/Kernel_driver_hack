@@ -107,13 +107,6 @@ jobs:
         fi
         echo "Kernel commit: $(git -C kernel_source rev-parse --short HEAD 2>/dev/null || echo 'unknown')"
 
-    - name: Download Kernel Build Artifacts
-      run: |
-        # You'll need to provide the URL of the kernel ZIP from your PitchKernel build
-        # or download it from the artifacts section
-        mkdir -p kernel_artifacts
-        # Add your download logic here
-
     - name: Prepare Kernel Source for Module Build
       working-directory: ./kernel_source
       run: |
@@ -145,13 +138,55 @@ jobs:
           exit 1
         fi
         
-        # Auto-patches (keep your existing patches here)
+        # ==========================================
+        # 🛠️ AUTO-PATCH: Fix input_event time field
+        # ==========================================
         if [ -f "drivers/hack/touch_input.c" ]; then
           sed -i 's/evt->time\.tv_sec/evt->input_event_sec/g' drivers/hack/touch_input.c
           sed -i 's/evt->time\.tv_usec/evt->input_event_usec/g' drivers/hack/touch_input.c
+          echo "✅ Applied input_event time field patch"
+        fi
+        
+        # ==========================================
+        # 🛠️ AUTO-PATCH: Fix unused variables in memory.c
+        # ==========================================
+        if [ -f "drivers/hack/memory.c" ]; then
+          sed -i 's/static struct kmem_cache \*my_vm_area_cachep = NULL/static struct kmem_cache *my_vm_area_cachep __maybe_unused = NULL/g' drivers/hack/memory.c
+          sed -i 's/static int (\*insert_vm_struct_ptr)(struct mm_struct \*mm, struct vm_area_struct \*vma) = NULL/static int (*insert_vm_struct_ptr)(struct mm_struct *mm, struct vm_area_struct *vma) __maybe_unused = NULL/g' drivers/hack/memory.c
+          sed -i 's/static bool ksyms_lookup_done = false/static bool ksyms_lookup_done __maybe_unused = false/g' drivers/hack/memory.c
+          echo "✅ Applied memory.c unused variable fix"
+        fi
+        
+        # ==========================================
+        # 🛠️ AUTO-PATCH: Fix unused variables in entry.c
+        # ==========================================
+        if [ -f "drivers/hack/entry.c" ]; then
+          sed -i 's/SPAWN_SUSPEND_CTL \*spawn_ctl = NULL/SPAWN_SUSPEND_CTL *spawn_ctl __maybe_unused = NULL/g' drivers/hack/entry.c
+          sed -i 's/RESUME_PROCESS_CTL \*resume_ctl = NULL/RESUME_PROCESS_CTL *resume_ctl __maybe_unused = NULL/g' drivers/hack/entry.c
+          sed -i 's/struct task_struct \*task = NULL/struct task_struct *task __maybe_unused = NULL/g' drivers/hack/entry.c
+          echo "✅ Applied entry.c unused variable fix"
+        fi
+        
+        # ==========================================
+        # 🛠️ AUTO-PATCH: Fix mmap_hijack.c missing headers
+        # ==========================================
+        if [ -f "drivers/hack/mmap_hijack.c" ]; then
+          if ! grep -q '#include <linux/vmalloc.h>' drivers/hack/mmap_hijack.c; then
+            sed -i '/#include <linux\/[a-z_]*\.h>/a #include <linux/vmalloc.h>' drivers/hack/mmap_hijack.c
+            echo "✅ Added #include <linux/vmalloc.h> to mmap_hijack.c"
+          fi
         fi
         
         # Add module to Kconfig and Makefile
+        if [ ! -f "drivers/hack/Kconfig" ]; then
+          cat > drivers/hack/Kconfig << 'EOF'
+        config KERNEL_HACK
+                tristate "Kernel Hack Module"
+                help
+                  Custom kernel module for munch device.
+        EOF
+        fi
+        
         grep -q 'source "drivers/hack/Kconfig"' drivers/Kconfig || \
           echo 'source "drivers/hack/Kconfig"' >> drivers/Kconfig
         grep -q 'obj-$(CONFIG_KERNEL_HACK) += hack/' drivers/Makefile || \
@@ -159,14 +194,6 @@ jobs:
         
         # Configure the kernel
         make O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- "$DEFCONFIG"
-        
-        # Copy Module.symvers from kernel artifacts (CRITICAL!)
-        if [ -f "../kernel_artifacts/extracted/Module.symvers" ]; then
-          cp ../kernel_artifacts/extracted/Module.symvers out/Module.symvers
-          echo "✅ Copied Module.symvers"
-        else
-          echo "⚠️ WARNING: Module.symvers not found! Module may not load."
-        fi
         
         # Set PitchKernel vermagic in config
         scripts/config --file out/.config --disable LOCALVERSION_AUTO
