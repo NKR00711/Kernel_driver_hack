@@ -285,8 +285,9 @@ jobs:
         make -j$(nproc --all) O=out ARCH=arm64 CC="ccache clang" CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- LD=ld.lld modules_prepare
         
         echo "=== Building kernel module ==="
+        # Use only supported warning flags for this clang version
         make -j$(nproc --all) O=out ARCH=arm64 CC="ccache clang" CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- LD=ld.lld M=drivers/hack \
-          EXTRA_CFLAGS="-Wno-error -Wno-unused-variable -Wno-unused-but-set-variable -Wno-missing-attributes -Wno-attributes -Wno-int-conversion -Wno-implicit-function-declaration -Wno-incompatible-pointer-types" || {
+          EXTRA_CFLAGS="-Wno-error -Wno-unused-variable -Wno-attributes -Wno-int-conversion -Wno-implicit-function-declaration -Wno-incompatible-pointer-types" || {
             echo "⚠️ Build with clang had warnings, trying without extra flags..."
             make -j$(nproc --all) O=out ARCH=arm64 CC="ccache clang" CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- LD=ld.lld M=drivers/hack || exit 1
         }
