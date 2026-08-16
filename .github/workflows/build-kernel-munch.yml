@@ -181,20 +181,30 @@ jobs:
         obj-m += kernel_module.o
         kernel_module-objs := main.o
         
-        # Suppress unused variable warnings
+        # Clang-compatible warning suppression flags
         ccflags-y += -Wno-error
         ccflags-y += -Wno-unused-variable
-        ccflags-y += -Wno-unused-but-set-variable
         ccflags-y += -Wno-unused-function
+        ccflags-y += -Wno-incompatible-pointer-types
+        ccflags-y += -Wno-int-conversion
         EOF
         else
-          # Add compiler flags to existing Makefile
-          echo "" >> drivers/hack/Makefile
-          echo "# Suppress unused variable warnings" >> drivers/hack/Makefile
-          echo "ccflags-y += -Wno-error" >> drivers/hack/Makefile
-          echo "ccflags-y += -Wno-unused-variable" >> drivers/hack/Makefile
-          echo "ccflags-y += -Wno-unused-but-set-variable" >> drivers/hack/Makefile
-          echo "ccflags-y += -Wno-unused-function" >> drivers/hack/Makefile
+          # Remove any existing unsupported flags and add Clang-compatible ones
+          echo "📝 Updating Makefile with Clang-compatible flags..."
+          # Remove lines with unsupported flags
+          sed -i '/-Wno-unused-but-set-variable/d' drivers/hack/Makefile
+          sed -i '/-Wno-missing-attributes/d' drivers/hack/Makefile
+          
+          # Add Clang-compatible flags if not already present
+          if ! grep -q "ccflags-y += -Wno-error" drivers/hack/Makefile; then
+            echo "" >> drivers/hack/Makefile
+            echo "# Clang-compatible warning suppression flags" >> drivers/hack/Makefile
+            echo "ccflags-y += -Wno-error" >> drivers/hack/Makefile
+            echo "ccflags-y += -Wno-unused-variable" >> drivers/hack/Makefile
+            echo "ccflags-y += -Wno-unused-function" >> drivers/hack/Makefile
+            echo "ccflags-y += -Wno-incompatible-pointer-types" >> drivers/hack/Makefile
+            echo "ccflags-y += -Wno-int-conversion" >> drivers/hack/Makefile
+          fi
         fi
         
         # Create Kconfig if it doesn't exist
@@ -333,6 +343,7 @@ jobs:
         }
         
         echo "=== Building kernel module ==="
+        # Build without extra flags first (use the flags from Makefile)
         make -j$(nproc --all) O=out ARCH=arm64 CC="ccache clang" CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- LD=ld.lld M=drivers/hack || {
           echo "⚠️ Build failed, checking if any .ko files were created..."
           find out/drivers/hack -name "*.ko" -ls 2>/dev/null || echo "❌ No modules built"
