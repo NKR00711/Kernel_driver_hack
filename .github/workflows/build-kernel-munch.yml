@@ -128,6 +128,17 @@ jobs:
         fi
         echo "✅ Using defconfig: $DEFCONFIG"
         
+        # ==========================================
+        # Set PitchKernel vermagic (matching kernel build)
+        # ==========================================
+        echo "🔧 Setting PitchKernel vermagic..."
+        echo "-pitchkernel" > localversion-st
+        echo "" > localversion-cip
+        
+        # Remove any existing localversion from defconfig
+        sed -i 's/CONFIG_LOCALVERSION="-aptusitu-perf"/CONFIG_LOCALVERSION=""/' "$DEFCONFIG_PATH" || true
+        sed -i 's/CONFIG_LOCALVERSION="-pitchkernel"/CONFIG_LOCALVERSION=""/' "$DEFCONFIG_PATH" || true
+        
         # Reset module directory and copy your module source
         rm -rf drivers/hack
         mkdir -p drivers/hack
@@ -158,18 +169,14 @@ jobs:
         # ==========================================
         echo "🔧 Patching mmap_hijack.c for missing vmalloc/vfree declarations..."
         if [ -f "drivers/hack/mmap_hijack.c" ]; then
-          # Check if vmalloc.h is already included
           if ! grep -q '#include <linux/vmalloc.h>' drivers/hack/mmap_hijack.c; then
-            # Add the include after the last existing include
             sed -i '/#include <linux\/[a-z_]*\.h>/a #include <linux/vmalloc.h>' drivers/hack/mmap_hijack.c
             echo "✅ Added #include <linux/vmalloc.h> to mmap_hijack.c"
-          else
-            echo "✅ mmap_hijack.c already includes vmalloc.h"
           fi
         fi
         
         # ==========================================
-        # 🛠️ AUTO-PATCH: Fix unused variables in memory.c
+        # 🛠️ AUTO-PATCH: Fix unused variables
         # ==========================================
         if [ -f "drivers/hack/memory.c" ]; then
           sed -i 's/static struct kmem_cache \*my_vm_area_cachep = NULL/static struct kmem_cache *my_vm_area_cachep __maybe_unused = NULL/g' drivers/hack/memory.c
@@ -178,9 +185,6 @@ jobs:
           echo "✅ Applied memory.c unused variable fix"
         fi
         
-        # ==========================================
-        # 🛠️ AUTO-PATCH: Fix entry.c unused variables
-        # ==========================================
         if [ -f "drivers/hack/entry.c" ]; then
           sed -i 's/SPAWN_SUSPEND_CTL \*spawn_ctl = NULL/SPAWN_SUSPEND_CTL *spawn_ctl __maybe_unused = NULL/g' drivers/hack/entry.c
           sed -i 's/RESUME_PROCESS_CTL \*resume_ctl = NULL/RESUME_PROCESS_CTL *resume_ctl __maybe_unused = NULL/g' drivers/hack/entry.c
@@ -244,6 +248,10 @@ jobs:
         # Configure the kernel with the correct defconfig
         echo "📋 Configuring kernel with $DEFCONFIG..."
         make O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- "$DEFCONFIG"
+        
+        # Disable LOCALVERSION_AUTO and set localversion to empty in config
+        scripts/config --file out/.config --disable LOCALVERSION_AUTO
+        scripts/config --file out/.config --set-str CONFIG_LOCALVERSION ""
         
         # ==========================================
         # Apply MIUI-specific DTS patches (MIUI default)
@@ -408,11 +416,18 @@ jobs:
         # Create zip filename
         ZIPNAME="${DEVICE}_module_${TARGET_OS}_${KSU_STATUS}_${VERMAGIC}_${TIMESTAMP}.zip"
         
+        # Create the dist directory first
         mkdir -p dist
-        # Copy module files with a README
-        cd kernel_source/out/drivers/hack
         
-        cat > README.txt << EOF
+        # Create a temporary directory for packaging
+        PACKAGE_DIR="package_${TIMESTAMP}"
+        mkdir -p "${PACKAGE_DIR}"
+        
+        # Copy module files
+        cp "${KOS[@]}" "${PACKAGE_DIR}/"
+        
+        # Create README
+        cat > "${PACKAGE_DIR}/README.txt" << EOF
         ==========================================
         Kernel Module for ${DEVICE}
         ==========================================
@@ -438,12 +453,14 @@ jobs:
         ==========================================
         EOF
         
-        zip -9 "../../../dist/${ZIPNAME}" ./*.ko README.txt 2>/dev/null || {
-          echo "⚠️ Could not create zip, trying without README..."
-          zip -9 "../../../dist/${ZIPNAME}" ./*.ko 2>/dev/null
-        }
+        # Create the zip
+        cd "${PACKAGE_DIR}"
+        zip -r9 "../dist/${ZIPNAME}" ./*
+        cd ..
         
-        cd ../../..
+        # Clean up
+        rm -rf "${PACKAGE_DIR}"
+        
         echo "Created: dist/${ZIPNAME}"
         echo "ZIP_NAME=${ZIPNAME}" >> $GITHUB_ENV
         echo "ZIP_PATH=dist/${ZIPNAME}" >> $GITHUB_ENV
