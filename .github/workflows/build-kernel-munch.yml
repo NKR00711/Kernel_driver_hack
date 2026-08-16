@@ -49,9 +49,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-    container:
-      image: ubuntu:20.04
+    runs-on: ubuntu-24.04  # Match kernel build environment
 
     steps:
     - name: Checkout Module Source
@@ -59,14 +57,29 @@ jobs:
       with:
         fetch-depth: 1
 
-    - name: Install necessary packages
+    - name: Install dependencies
       run: |
-        apt-get update
-        export DEBIAN_FRONTEND=noninteractive
-        ln -fs /usr/share/zoneinfo/America/New_York /etc/localtime
-        apt-get install -y tzdata lsb-release
-        dpkg-reconfigure --frontend noninteractive tzdata
-        apt-get install -y git ccache automake flex lzop bison gperf build-essential zip curl zlib1g-dev g++-multilib libxml2-utils bzip2 libbz2-dev libbz2-1.0 libghc-bzlib-dev squashfs-tools pngcrush schedtool dpkg-dev liblz4-tool make optipng maven libssl-dev pwgen libswitch-perl policycoreutils minicom libxml-sax-base-perl libxml-simple-perl bc libc6-dev-i386 lib32ncurses5-dev libx11-dev lib32z-dev libgl1-mesa-dev xsltproc unzip device-tree-compiler python3 python2 kmod
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential git curl wget bison flex zip bc cpio \
+          libssl-dev ccache tar python-is-python3
+
+    - name: Setup ZyCromerZ Clang 16
+      run: |
+        mkdir -p "$HOME/zyc-clang"
+        cd "$HOME/zyc-clang"
+        curl -LO "https://github.com/ZyCromerZ/Clang/releases/download/16.0.6-20260510-release/Clang-16.0.6-20260510.tar.gz"
+        if [ ! -s "Clang-16.0.6-20260510.tar.gz" ]; then
+          echo "::error::Download failed!"
+          exit 1
+        fi
+        tar -xzf "Clang-16.0.6-20260510.tar.gz"
+        rm -f "Clang-16.0.6-20260510.tar.gz"
+        if [ ! -x "$HOME/zyc-clang/bin/clang" ]; then
+          echo "::error::Clang not found!"
+          exit 1
+        fi
+        echo "$HOME/zyc-clang/bin" >> $GITHUB_PATH
 
     - name: Cache Dependencies
       uses: actions/cache@v4
@@ -74,7 +87,6 @@ jobs:
       with:
         path: |
           kernel_source
-          clang
           ~/.ccache
         key: ${{ runner.os }}-kernel-munch-${{ hashFiles('**/Makefile', '**/Kconfig') }}
         restore-keys: |
@@ -93,24 +105,14 @@ jobs:
           git clone --depth=1 --single-branch -b android16-pitchkernel \
             https://github.com/MujinnPark/android_kernel_xiaomi_sm8250.git kernel_source
         fi
-        echo "Kernel branch: $(git -C kernel_source branch --show-current 2>/dev/null || echo 'detached')"
         echo "Kernel commit: $(git -C kernel_source rev-parse --short HEAD 2>/dev/null || echo 'unknown')"
 
-    - name: Ensure Toolchain
+    - name: Download Kernel Build Artifacts
       run: |
-        if [ -d clang/.git ]; then
-          echo "clang already prepared"
-        else
-          rm -rf clang
-          git clone --depth=1 https://gitlab.com/LeCmnGend/proton-clang.git -b clang-13 clang
-        fi
-
-    - name: Set up Environment
-      run: |
-        echo "$(pwd)/clang/bin" >> $GITHUB_PATH
-        echo "CCACHE_DIR=$(pwd)/.ccache" >> $GITHUB_ENV
-        echo "USE_CCACHE=1" >> $GITHUB_ENV
-        ccache -M 5G
+        # You'll need to provide the URL of the kernel ZIP from your PitchKernel build
+        # or download it from the artifacts section
+        mkdir -p kernel_artifacts
+        # Add your download logic here
 
     - name: Prepare Kernel Source for Module Build
       working-directory: ./kernel_source
@@ -122,236 +124,63 @@ jobs:
         
         if [ ! -f "$DEFCONFIG_PATH" ]; then
           echo "❌ Defconfig not found: $DEFCONFIG_PATH"
-          echo "Available defconfigs:"
-          ls arch/arm64/configs/ | grep -E "(_defconfig$|defconfig$)" || echo "No defconfigs found"
           exit 1
         fi
         echo "✅ Using defconfig: $DEFCONFIG"
         
-        # ==========================================
-        # Set PitchKernel vermagic (matching kernel build)
-        # ==========================================
-        echo "🔧 Setting PitchKernel vermagic..."
+        # Set PitchKernel vermagic
         echo "-pitchkernel" > localversion-st
         echo "" > localversion-cip
         
-        # Remove any existing localversion from defconfig
+        # Remove existing localversion from defconfig
         sed -i 's/CONFIG_LOCALVERSION="-aptusitu-perf"/CONFIG_LOCALVERSION=""/' "$DEFCONFIG_PATH" || true
-        sed -i 's/CONFIG_LOCALVERSION="-pitchkernel"/CONFIG_LOCALVERSION=""/' "$DEFCONFIG_PATH" || true
         
-        # Reset module directory and copy your module source
+        # Copy module source
         rm -rf drivers/hack
         mkdir -p drivers/hack
-        
-        # Copy your module source from the repo
         if [ -d "../${{ inputs.module_path }}" ]; then
-          echo "📂 Copying module from: ../${{ inputs.module_path }}"
           cp -a ../${{ inputs.module_path }}/. drivers/hack/
         else
           echo "❌ Module source not found at: ${{ inputs.module_path }}"
-          echo "Available directories in repo root:"
-          ls -la ../
           exit 1
         fi
         
-        # ==========================================
-        # 🛠️ AUTO-PATCH: Fix input_event time field
-        # ==========================================
-        echo "🔧 Patching touch_input.c for kernel compatibility..."
+        # Auto-patches (keep your existing patches here)
         if [ -f "drivers/hack/touch_input.c" ]; then
           sed -i 's/evt->time\.tv_sec/evt->input_event_sec/g' drivers/hack/touch_input.c
           sed -i 's/evt->time\.tv_usec/evt->input_event_usec/g' drivers/hack/touch_input.c
-          echo "✅ Applied input_event time field patch"
         fi
         
-        # ==========================================
-        # 🛠️ AUTO-PATCH: Fix mmap_hijack.c missing headers
-        # ==========================================
-        echo "🔧 Patching mmap_hijack.c for missing vmalloc/vfree declarations..."
-        if [ -f "drivers/hack/mmap_hijack.c" ]; then
-          if ! grep -q '#include <linux/vmalloc.h>' drivers/hack/mmap_hijack.c; then
-            sed -i '/#include <linux\/[a-z_]*\.h>/a #include <linux/vmalloc.h>' drivers/hack/mmap_hijack.c
-            echo "✅ Added #include <linux/vmalloc.h> to mmap_hijack.c"
-          fi
-        fi
-        
-        # ==========================================
-        # 🛠️ AUTO-PATCH: Fix unused variables
-        # ==========================================
-        if [ -f "drivers/hack/memory.c" ]; then
-          sed -i 's/static struct kmem_cache \*my_vm_area_cachep = NULL/static struct kmem_cache *my_vm_area_cachep __maybe_unused = NULL/g' drivers/hack/memory.c
-          sed -i 's/static int (\*insert_vm_struct_ptr)(struct mm_struct \*mm, struct vm_area_struct \*vma) = NULL/static int (*insert_vm_struct_ptr)(struct mm_struct *mm, struct vm_area_struct *vma) __maybe_unused = NULL/g' drivers/hack/memory.c
-          sed -i 's/static bool ksyms_lookup_done = false/static bool ksyms_lookup_done __maybe_unused = false/g' drivers/hack/memory.c
-          echo "✅ Applied memory.c unused variable fix"
-        fi
-        
-        if [ -f "drivers/hack/entry.c" ]; then
-          sed -i 's/SPAWN_SUSPEND_CTL \*spawn_ctl = NULL/SPAWN_SUSPEND_CTL *spawn_ctl __maybe_unused = NULL/g' drivers/hack/entry.c
-          sed -i 's/RESUME_PROCESS_CTL \*resume_ctl = NULL/RESUME_PROCESS_CTL *resume_ctl __maybe_unused = NULL/g' drivers/hack/entry.c
-          sed -i 's/struct task_struct \*task = NULL/struct task_struct *task __maybe_unused = NULL/g' drivers/hack/entry.c
-          echo "✅ Applied entry.c unused variable fix"
-        fi
-        
-        # Check for Makefile
-        if [ ! -f "drivers/hack/Makefile" ]; then
-          echo "❌ Makefile not found in module source!"
-          echo "Creating default Makefile..."
-          cat > drivers/hack/Makefile << 'EOF'
-        obj-m += kernel_module.o
-        kernel_module-objs := main.o
-        
-        # Clang-compatible warning suppression flags
-        ccflags-y += -Wno-error
-        ccflags-y += -Wno-unused-variable
-        ccflags-y += -Wno-unused-function
-        ccflags-y += -Wno-incompatible-pointer-types
-        ccflags-y += -Wno-int-conversion
-        ccflags-y += -Wno-implicit-function-declaration
-        EOF
-        else
-          # Remove any existing unsupported flags and add Clang-compatible ones
-          echo "📝 Updating Makefile with Clang-compatible flags..."
-          sed -i '/-Wno-unused-but-set-variable/d' drivers/hack/Makefile
-          sed -i '/-Wno-missing-attributes/d' drivers/hack/Makefile
-          
-          # Add Clang-compatible flags if not already present
-          if ! grep -q "ccflags-y += -Wno-error" drivers/hack/Makefile; then
-            echo "" >> drivers/hack/Makefile
-            echo "# Clang-compatible warning suppression flags" >> drivers/hack/Makefile
-            echo "ccflags-y += -Wno-error" >> drivers/hack/Makefile
-            echo "ccflags-y += -Wno-unused-variable" >> drivers/hack/Makefile
-            echo "ccflags-y += -Wno-unused-function" >> drivers/hack/Makefile
-            echo "ccflags-y += -Wno-incompatible-pointer-types" >> drivers/hack/Makefile
-            echo "ccflags-y += -Wno-int-conversion" >> drivers/hack/Makefile
-            echo "ccflags-y += -Wno-implicit-function-declaration" >> drivers/hack/Makefile
-          fi
-        fi
-        
-        # Create Kconfig if it doesn't exist
-        if [ ! -f "drivers/hack/Kconfig" ]; then
-          echo "⚠️ Kconfig not found, creating one..."
-          cat > drivers/hack/Kconfig << 'EOF'
-        config KERNEL_HACK
-                tristate "Kernel Hack Module"
-                help
-                  Custom kernel module for munch device.
-                  Say Y/M here to enable.
-        EOF
-        fi
-        
-        # Add module to Kconfig and Makefile (idempotent)
+        # Add module to Kconfig and Makefile
         grep -q 'source "drivers/hack/Kconfig"' drivers/Kconfig || \
           echo 'source "drivers/hack/Kconfig"' >> drivers/Kconfig
         grep -q 'obj-$(CONFIG_KERNEL_HACK) += hack/' drivers/Makefile || \
           echo 'obj-$(CONFIG_KERNEL_HACK) += hack/' >> drivers/Makefile
         
-        # Configure the kernel with the correct defconfig
-        echo "📋 Configuring kernel with $DEFCONFIG..."
+        # Configure the kernel
         make O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- "$DEFCONFIG"
         
-        # Disable LOCALVERSION_AUTO and set localversion to empty in config
+        # Copy Module.symvers from kernel artifacts (CRITICAL!)
+        if [ -f "../kernel_artifacts/extracted/Module.symvers" ]; then
+          cp ../kernel_artifacts/extracted/Module.symvers out/Module.symvers
+          echo "✅ Copied Module.symvers"
+        else
+          echo "⚠️ WARNING: Module.symvers not found! Module may not load."
+        fi
+        
+        # Set PitchKernel vermagic in config
         scripts/config --file out/.config --disable LOCALVERSION_AUTO
-        scripts/config --file out/.config --set-str CONFIG_LOCALVERSION ""
+        scripts/config --file out/.config --set-str CONFIG_LOCALVERSION "-pitchkernel"
         
-        # ==========================================
-        # Apply MIUI-specific DTS patches (MIUI default)
-        # ==========================================
-        if [ "${{ inputs.target_os }}" == "miui" ] || [ "${{ inputs.target_os }}" == "both" ]; then
-          echo "🔧 Applying MIUI DTS patches..."
-          
-          DTS_SOURCE="arch/arm64/boot/dts/vendor/qcom"
-          DTS_BACKUP=".dts.bak.miui"
-          
-          cp -a "${DTS_SOURCE}" "${DTS_BACKUP}"
-          
-          # Apply MIUI specific sed patches to dts
-          sed -i 's/<154>/<1537>/g' ${DTS_SOURCE}/dsi-panel-j1s* || true
-          sed -i 's/<154>/<1537>/g' ${DTS_SOURCE}/dsi-panel-j2* || true
-          sed -i 's/<155>/<1544>/g' ${DTS_SOURCE}/dsi-panel-j3s-37-02-0a-dsc-video.dtsi || true
-          sed -i 's/<155>/<1545>/g' ${DTS_SOURCE}/dsi-panel-j11-38-08-0a-fhd-cmd.dtsi || true
-          sed -i 's/<155>/<1546>/g' ${DTS_SOURCE}/dsi-panel-k11a-38-08-0a-dsc-cmd.dtsi || true
-          sed -i 's/<155>/<1546>/g' ${DTS_SOURCE}/dsi-panel-l11r-38-08-0a-dsc-cmd.dtsi || true
-          sed -i 's/<70>/<695>/g' ${DTS_SOURCE}/dsi-panel-j11-38-08-0a-fhd-cmd.dtsi || true
-          sed -i 's/<70>/<695>/g' ${DTS_SOURCE}/dsi-panel-j3s-37-02-0a-dsc-video.dtsi || true
-          sed -i 's/<70>/<695>/g' ${DTS_SOURCE}/dsi-panel-k11a-38-08-0a-dsc-cmd.dtsi || true
-          sed -i 's/<70>/<695>/g' ${DTS_SOURCE}/dsi-panel-l11r-38-08-0a-dsc-cmd.dtsi || true
-          sed -i 's/<71>/<710>/g' ${DTS_SOURCE}/dsi-panel-j1s* || true
-          sed -i 's/<71>/<710>/g' ${DTS_SOURCE}/dsi-panel-j2* || true
-          
-          echo "✅ MIUI DTS patches applied"
-        fi
-        
-        # ==========================================
-        # KernelSU Configurations
-        # ==========================================
-        if [ "${{ inputs.ksu }}" == "true" ]; then
-          echo "🔧 Enabling KernelSU (ReSukiSU) support..."
-          scripts/config --file out/.config \
-            -e KSU \
-            -e THREAD_INFO_IN_TASK \
-            -e KSU_SUSFS
-        fi
-        
-        # ==========================================
-        # Target OS specific configurations
-        # ==========================================
-        if [ "${{ inputs.target_os }}" == "miui" ] || [ "${{ inputs.target_os }}" == "both" ]; then
-          echo "🔧 Applying MIUI specific configurations..."
-          scripts/config --file out/.config \
-            --set-str STATIC_USERMODEHELPER_PATH /system/bin/micd \
-            -e PERF_CRITICAL_RT_TASK \
-            -e SF_BINDER \
-            -e OVERLAY_FS \
-            -e MIGT \
-            -e MIGT_ENERGY_MODEL \
-            -e MIHW \
-            -e PACKAGE_RUNTIME_INFO \
-            -e BINDER_OPT \
-            -e KPERFEVENTS \
-            -e PERF_HUMANTASK \
-            -d LTO_CLANG \
-            -e LTO_NONE \
-            -d SHADOW_CALL_STACK \
-            -e XIAOMI_MIUI \
-            -d MI_MEMORY_SYSFS \
-            -e TASK_DELAY_ACCT \
-            -e MIUI_ZRAM_MEMORY_TRACKING \
-            -e PERF_HELPER \
-            -e BOOTUP_RECLAIM \
-            -e MI_RECLAIM \
-            -e RTMM \
-            -e MILLET_CGROUP \
-            -e MILLET_SIG \
-            -e MILLET_BINDER \
-            -e MILLET_PKG \
-            -e MILLET_BINDER_GKI \
-            -e MILLET_CORE \
-            -e MILLET_HS \
-            -e BINDER_PRIO \
-            -d REKERNEL \
-            -d REKERNEL_NETWORK
-        fi
-        
-        if [ "${{ inputs.target_os }}" == "aosp" ] || [ "${{ inputs.target_os }}" == "both" ]; then
-          echo "🔧 Applying AOSP specific configurations..."
-          scripts/config --file out/.config \
-            -e REKERNEL \
-            -e REKERNEL_NETWORK
-        fi
-        
-        # Enable the module config
+        # Enable the module
         scripts/config --file out/.config --enable "${{ inputs.module_config }}"
         
         # Regenerate config
-        echo "🔄 Regenerating config with olddefconfig..."
         make O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
         
-        # Show kernel version and verify config
+        # Show kernel version
         echo "=== Kernel Version ==="
         make O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- kernelrelease
-        
-        echo "=== Module Config Status ==="
-        grep "${{ inputs.module_config }}" out/.config || echo "⚠️ Module config not found!"
 
     - name: Build Kernel Module
       working-directory: ./kernel_source
@@ -360,28 +189,13 @@ jobs:
         export KBUILD_BUILD_TIMESTAMP=""
         
         echo "=== Building modules_prepare ==="
-        make -j$(nproc --all) O=out ARCH=arm64 CC="ccache clang" CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- LD=ld.lld modules_prepare || {
-          echo "⚠️ modules_prepare failed, trying with olddefconfig first..."
-          make O=out ARCH=arm64 CC="ccache clang" CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
-          make -j$(nproc --all) O=out ARCH=arm64 CC="ccache clang" CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- LD=ld.lld modules_prepare
-        }
+        make -j$(nproc --all) O=out ARCH=arm64 CC="ccache clang" CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- LD=ld.lld modules_prepare
         
         echo "=== Building kernel module ==="
-        make -j$(nproc --all) O=out ARCH=arm64 CC="ccache clang" CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- LD=ld.lld M=drivers/hack || {
-          echo "⚠️ Build failed, checking if any .ko files were created..."
-          find out/drivers/hack -name "*.ko" -ls 2>/dev/null || echo "❌ No modules built"
-          exit 1
-        }
+        make -j$(nproc --all) O=out ARCH=arm64 CC="ccache clang" CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- LD=ld.lld M=drivers/hack
         
-        # Find and show the built modules
         echo "=== Built modules ==="
         find out/drivers/hack -name "*.ko" -ls 2>/dev/null || echo "❌ No modules found!"
-
-    - name: Upload Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: KernelModule
-        path: kernel_source/out/drivers/hack/*.ko
 
     - name: Package Module
       if: success()
@@ -391,90 +205,37 @@ jobs:
         KOS=(kernel_source/out/drivers/hack/*.ko)
         if [ ${#KOS[@]} -eq 0 ]; then
           echo "❌ No .ko files found!"
-          echo "Checking build output..."
-          find kernel_source/out -name "*.ko" 2>/dev/null || echo "No .ko files anywhere"
           exit 1
         fi
         
-        echo "Found ${#KOS[@]} module(s)"
-        for ko in "${KOS[@]}"; do
-          echo "Module: $ko"
-          modinfo "$ko" 2>/dev/null || echo "Could not read modinfo"
-        done
-        
-        # Get vermagic from first module
         KO="${KOS[0]}"
         VERMAGIC="$(modinfo -F vermagic "$KO" 2>/dev/null | tr -d '\n' | awk '{print $1}' || echo 'unknown')"
-        echo "vermagic: $VERMAGIC"
-        
-        # Get device name
         DEVICE="${{ inputs.device }}"
         TARGET_OS="${{ inputs.target_os }}"
         KSU_STATUS="${{ inputs.ksu && 'ReSukiSU' || 'NoKernelSU' }}"
         TIMESTAMP=$(date +'%Y%m%d_%H%M%S')
-        
-        # Create zip filename
         ZIPNAME="${DEVICE}_module_${TARGET_OS}_${KSU_STATUS}_${VERMAGIC}_${TIMESTAMP}.zip"
         
-        # Create the dist directory first
         mkdir -p dist
-        
-        # Create a temporary directory for packaging
         PACKAGE_DIR="package_${TIMESTAMP}"
         mkdir -p "${PACKAGE_DIR}"
-        
-        # Copy module files
         cp "${KOS[@]}" "${PACKAGE_DIR}/"
         
-        # Create README
         cat > "${PACKAGE_DIR}/README.txt" << EOF
-        ==========================================
         Kernel Module for ${DEVICE}
-        ==========================================
-        
-        Build Information:
-        - Device: ${DEVICE}
-        - Target OS: ${TARGET_OS}
-        - KernelSU: ${KSU_STATUS}
-        - Vermagic: ${VERMAGIC}
-        - Build Date: $(date -u)
-        - GitHub Run: ${{ github.run_id }}
-        
-        Modules Included:
-        $(ls -la *.ko 2>/dev/null)
-        
-        Installation:
-        1. Copy module to device
-        2. insmod <module_name>.ko
-        
-        Verification:
-        modinfo <module_name>.ko
-        
-        ==========================================
+        Build Date: $(date -u)
+        Vermagic: ${VERMAGIC}
+        Target OS: ${TARGET_OS}
+        KernelSU: ${KSU_STATUS}
         EOF
         
-        # Create the zip
         cd "${PACKAGE_DIR}"
         zip -r9 "../dist/${ZIPNAME}" ./*
         cd ..
-        
-        # Clean up
         rm -rf "${PACKAGE_DIR}"
         
-        echo "Created: dist/${ZIPNAME}"
-        echo "ZIP_NAME=${ZIPNAME}" >> $GITHUB_ENV
-        echo "ZIP_PATH=dist/${ZIPNAME}" >> $GITHUB_ENV
-        echo "VERMAGIC=${VERMAGIC}" >> $GITHUB_ENV
-        
-        echo "### 📊 Module Build Summary" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
-        echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
-        echo "| **Device** | ${DEVICE} |" >> $GITHUB_STEP_SUMMARY
-        echo "| **Target OS** | ${TARGET_OS} |" >> $GITHUB_STEP_SUMMARY
-        echo "| **KernelSU** | ${KSU_STATUS} |" >> $GITHUB_STEP_SUMMARY
-        echo "| **Vermagic** | ${VERMAGIC} |" >> $GITHUB_STEP_SUMMARY
-        echo "| **ZIP** | \`${ZIPNAME}\` |" >> $GITHUB_STEP_SUMMARY
+        echo "ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
+        echo "ZIP_PATH=dist/${ZIP_NAME}" >> $GITHUB_ENV
 
     - name: Upload ZIP Artifact
       uses: actions/upload-artifact@v4
