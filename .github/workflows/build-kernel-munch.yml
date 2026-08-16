@@ -112,7 +112,7 @@ jobs:
         echo "USE_CCACHE=1" >> $GITHUB_ENV
         ccache -M 5G
 
-    - name: Prepare Kernel Source for Module Build (MIUI Default)
+    - name: Prepare Kernel Source for Module Build
       working-directory: ./kernel_source
       run: |
         # Get device from input
@@ -148,21 +148,21 @@ jobs:
           echo "❌ Makefile not found in module source!"
           echo "Creating default Makefile..."
           cat > drivers/hack/Makefile << 'EOF'
-          obj-m += kernel_module.o
-          kernel_module-objs := main.o
-          EOF
+        obj-m += kernel_module.o
+        kernel_module-objs := main.o
+        EOF
         fi
         
         # Create Kconfig if it doesn't exist
         if [ ! -f "drivers/hack/Kconfig" ]; then
           echo "⚠️ Kconfig not found, creating one..."
           cat > drivers/hack/Kconfig << 'EOF'
-          config KERNEL_HACK
-                  tristate "Kernel Hack Module"
-                  help
-                    Custom kernel module for munch device.
-                    Say Y/M here to enable.
-          EOF
+        config KERNEL_HACK
+                tristate "Kernel Hack Module"
+                help
+                  Custom kernel module for munch device.
+                  Say Y/M here to enable.
+        EOF
         fi
         
         # Add module to Kconfig and Makefile (idempotent)
